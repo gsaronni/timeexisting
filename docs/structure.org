@@ -1,0 +1,150 @@
+:PROPERTIES:
+:ID:       b2e7d4a9-1c53-4f8e-9a60-7d2f18c3e5b4
+:END:
+#+TITLE: timeexisting Repository Structure
+#+DATE: 2026-09-17
+#+FILETAGS: :python:timeexisting:reference:
+
+* Purpose
+
+This file explains the shape of the repository: what each directory and root file is for, why it exists, and what goes wrong without it. It is a learning document as much as a reference. The specification is =timeexisting-roadmap.org=; this file explains the container the specification lives in.
+
+
+* 1. The shape of a modern Python project
+
+A Python project that is more than one file has three separate concerns, and the layout keeps them apart:
+
+| Concern | Lives in | Owned by |
+|---|---|---|
+| What the program is | =src/timeexisting/= | The code |
+| How to build, install and check it | =pyproject.toml= and the dotfiles at the root | Tooling |
+| Whether it works | =tests/= | The test suite |
+
+The original =TimeExisting.py= collapsed all three into one file with nothing to build and nothing to test. The single file was not the problem; the absence of the other two was.
+
+#+begin_src text
+te/
+├── pyproject.toml            the project's single build and tooling manifest
+├── README.org                front door for humans
+├── CLAUDE.md                 front door for implementing agents
+├── .gitignore                what git must never see
+├── .gitattributes            how git stores line endings
+├── .pre-commit-config.yaml   checks that run before every commit
+├── .github/workflows/ci.yml  the same checks, run by GitHub on every push
+├── docs/                     specification and explanations, this file included
+├── tests/                    pytest suite, mirrors the package layout
+├── scripts/                  operational helpers, not part of the package
+└── src/
+    └── timeexisting/         the importable package
+#+end_src
+
+
+* 2. Why =src/=
+
+The package does not sit at the repository root. It sits one level down, under =src/=. This is called the src layout and it exists to make one specific bug impossible.
+
+When you run =python= or =pytest= from a directory, that directory is put on =sys.path=. If the package sits at the root, then =import timeexisting= silently resolves to the folder on disk rather than to the installed package. Every test passes, every import works, and none of it proves the package is installable. The first time it is installed anywhere else, typically another machine, something is missing: an asset that was never declared as package data, a module that was never listed, a file that only worked because of the working directory. The src layout means the working-copy folder is not importable by accident, so tests can only pass against the package as =pip install -e .= sees it.
+
+The cost is one extra directory level and the =packages = ["src/timeexisting"]= line in =pyproject.toml=. The Python Packaging Authority recommends it; hatchling, setuptools and flit all support it.
+
+
+* 3. The package, directory by directory
+
+Each directory under =src/timeexisting/= is a Python package, marked by its =__init__.py=. Each one has one job. The rule that makes the layout worth having is the dependency direction: a directory may import from the ones above it in this table, never from the ones below.
+
+| Directory | Job | May import from |
+|---|---|---|
+| =config/= | Load =config.toml= and =calendar.toml= into frozen dataclasses and validate them. Nothing else reads TOML. | stdlib only |
+| =domain/= | The pure model: clock protocol, phases and segments, schedule builder, resolver, classification rules, flex accounting. No I/O, no Rich, no clock calls. =now= is always a parameter. | =config= |
+| =calendar/= | Danish public holidays from the =holidays= package plus the override and leave tables. Answers "is this date a working day, and if not, why". | =config=, =domain= |
+| =ledger/= | The event schema, the append-only JSONL store, sharding by host, replay into a timeline, and recovery after unclean shutdown. | =config=, =domain= |
+| =presence/= | Detecting whether the session is locked or the machine slept. One backend per platform behind a common protocol, plus the platform-independent heartbeat and monotonic-jump check. | =ledger= |
+| =collector/= | The headless background process: lockfile, polling loop, heartbeat writer, console control handler. | =presence=, =ledger= |
+| =power/= | Putting the laptop to sleep at target. Windows only; other platforms get a no-op. | =config= |
+| =notify/= | OS notifications: Windows toasts, =notify-send=, terminal bell fallback. | stdlib only |
+| =content/= | Voice packs (phrases, by theme and locale), palettes (colours, by theme), and the ASCII art manifest. The loader with fallback and the shuffled-deque rotation. | stdlib only |
+| =ui/= | Everything Rich: the =Live= loop, layout, panels, theme, key reader, stats renderer. Contains no arithmetic. | everything above |
+| =editor/= | The =te edit= subcommand: structured, append-only corrections to the ledger. | =ledger= |
+| =assets/= | Not a package. Package data: the ASCII art files. Shipped inside the wheel via =force-include= in =pyproject.toml= and read with =importlib.resources=. | not code |
+
+Three files sit directly in the package:
+
+- =cli.py= is the =argparse= surface. It parses arguments and dispatches. It contains no logic, so the same code paths run whether invoked from the command line or from a test.
+- =paths.py= resolves every on-disk location through =platformdirs=. Nothing else in the program builds a path to config or state.
+- =__main__.py= makes =python -m timeexisting= work, which is what =pythonw.exe= is given when the viewer spawns the collector.
+
+** The purity rule, restated
+
+=domain/= is the reason the rest of the layout is worth anything. Because it never touches a clock, a file or a terminal, every question about the schedule can be answered in a test by passing in a fixed time and a fixed ledger. The indentation bug in the legacy script survived two years because the rendering and the arithmetic were the same function, and the only way to see the pre-work state was to be awake before nine. With a pure resolver, that state is one test case among 1,440.
+
+
+* 4. The root files
+
+** =pyproject.toml=
+
+The single manifest for building, installing and checking the project. Four things live in it and nowhere else:
+
+- =[build-system]= names hatchling as the tool that turns the source tree into an installable wheel.
+- =[project]= is the package metadata: name, version, Python floor, dependencies, and the =te= console script that pip creates in the venv's =Scripts= directory.
+- =[project.optional-dependencies]= holds the extras: =dev= for ruff, pytest and pre-commit, =windows= for the toast and =pywin32= packages, so =pip install -e ".[dev,windows]"= pulls exactly the set a given machine needs.
+- =[tool.ruff]= and =[tool.pytest.ini_options]= configure the linter and the test runner, so neither needs its own file.
+
+The =readme= entry names =README.org= with an explicit content type, because hatchling only recognises =.md=, =.rst= and =.txt= by extension.
+
+** =README.org= and =CLAUDE.md=
+
+Two front doors for two readers. The README is for a human arriving at the repository. =CLAUDE.md= is read automatically by Claude Code at the start of every session; it points at the specification and states the handful of rules that must never be broken. It is short on purpose, because an agent reads it cold every time.
+
+** =.gitignore=
+
+What git must never track. Beyond the usual Python noise, it excludes everything the program writes at runtime: the ledger, the state directory, logs, and any local config copy. These files record when you were at a machine, minute by minute. They stay on the machine.
+
+** =.gitattributes=
+
+=* text=auto eol=lf= tells git to store every text file with LF line endings and check them out as LF, on every platform. Without it, Windows git defaults to converting to CRLF on checkout, and the warnings you saw on the first =git add= become a permanent background noise, and a linter on Linux disagrees with the same file on Windows.
+
+** =.pre-commit-config.yaml=
+
+A list of checks git runs before accepting a commit: ruff lint with autofix, ruff format, trailing-whitespace and end-of-file fixers, TOML syntax, merge-conflict markers. =pre-commit install= wires it into =.git/hooks=. The point is that a commit which fails lint never exists, so nobody has to review formatting.
+
+** =.github/workflows/ci.yml=
+
+The same checks, run by GitHub on every push, on Ubuntu and Windows. Pre-commit protects your machine; CI protects the repository from any machine, including one where the hooks were skipped.
+
+
+* 5. =tests/=
+
+Mirrors the package: =test_schedule.py= for =domain/schedule.py=, =test_resolver.py= for =domain/resolver.py=, and so on. =conftest.py= holds shared fixtures, above all a =FixedClock= and a small synthetic ledger. =fixtures/= holds sample JSONL and TOML files for replay and config tests.
+
+The suite runs against the installed package, which is what the src layout guarantees, so a green run means the wheel works.
+
+
+* 6. =docs/= and =scripts/=
+
+=docs/= holds the roadmap and this file. Prose about the project, in org, versioned with the code so a change to the spec and the change that implements it land in the same commit.
+
+=scripts/= holds operational helpers that are not part of the package: the PowerShell script that creates the Startup shortcut for the collector, and anything similar. They are run by a human, never imported.
+
+
+* 7. What happens on =pip install -e .=
+
+Reading the install output line by line is the fastest way to see the layout working:
+
+1. pip reads =[build-system]= and installs hatchling into a temporary environment.
+2. hatchling reads =[project]=, validates the metadata, and finds =src/timeexisting= from =packages=.
+3. It builds an editable wheel: a small file that tells Python "the package =timeexisting= lives at this path on disk". Editable means edits to the source are live without reinstalling.
+4. pip installs the wheel, then every dependency, then the extras you asked for.
+5. pip writes =Scripts\te.exe=, a launcher that calls =timeexisting.cli:main=.
+
+After that, =import timeexisting= works from any directory, =te= works from any shell with the venv active, and =importlib.resources.files("timeexisting")= finds =assets/= because =force-include= declared it. That last point is the one-liner that printed =16=.
+
+
+* 8. Reading order for a newcomer
+
+1. =README.org=, one minute.
+2. This file.
+3. =timeexisting-roadmap.org= sections 3 and 4, the architecture and the schedule model.
+4. =src/timeexisting/domain/=, in the order =clock=, =segments=, =schedule=, =resolver=.
+5. =tests/test_resolver.py=, which is the model's contract written as examples.
+
+Everything else is plumbing around those five.

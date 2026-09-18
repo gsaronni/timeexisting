@@ -1,0 +1,520 @@
+:PROPERTIES:
+:ID:       7c3f1a2e-5b84-4d16-9f20-3ae8c1d7b092
+:END:
+#+TITLE: timeexisting Roadmap and Specification
+#+DATE: 2026-09-17
+#+FILETAGS: :python:timeexisting:spec:standing:
+
+* Related
+- Repository: =C:\Users\you\proj\te=, package =timeexisting=, console script =te=.
+- =CLAUDE.md= at the repository root points implementing agents here.
+
+*Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
+
+*Last revised:* week 38, 17 September 2026.
+
+
+* 1. Purpose and Scope
+
+=timeexisting= is a personal work-time tracker with a deliberately bleak presentation layer. It answers one accounting question, "am I above or below 37 hours this week and across all time", one operational one, "put the laptop to sleep when the day is done", and one presentational one, "how grim can that be made to look".
+
+Scope boundaries:
+
+- A personal instrument. Never an authoritative timesheet, never submitted, never defended.
+- Presentation is a first-class requirement. A correct tracker with flat output has failed.
+- Flextime with a fixed contractual target. No overtime rates, no approvals, nothing an HR system cares about.
+- Platforms: Windows with PowerShell 7 is the primary target and the only one with a power backend. Fedora is secondary and fully supported for tracking and stats. Termux is listed as future and is permitted to degrade.
+- Python 3.14 floor.
+
+
+* 2. Current State and Known Defects
+
+=src/timeexisting/_legacy.py= is the original program, retained as the source of tone content and discarded as architecture. It is excluded from linting until phase 0 deletes it.
+
+Defects, in order of severity:
+
+1. *Indentation defect in =make_time_panel=.* The =if COFFEE_ART and self.showcase_mode:= block sits one level out from its enclosing =if now.hour < START_HOUR:=. The pre-work =return Panel(...)= is nested inside the coffee check and the following =elif now.hour >= END_HOUR:= binds to the coffee =if=. Outside showcase mode a pre-work run falls through to the work-hours branch with =now < start_time=, producing negative elapsed time, a negative percentage, and a negative message index that wraps silently.
+2. *Asset filename drift.* =load_ascii_art("coffee.txt")= against a file named =coffe.txt=. Filenames on disk are canonical and are not renamed. Code adapts.
+3. *Bare =except:=* swallows =KeyboardInterrupt= and =SystemExit=. Narrow to =OSError=.
+4. *Semantic drift in art constants.* Bouldering loads =surf.txt=, hiking loads =fencing.txt=, coding loads =chess.txt=. Constants are renamed to match the files and the activity table rebuilt around the real asset set.
+5. *=ShowcaseState.get_simulated_time= raises and mutates.* =datetime.now().replace(month=...)= raises on days 29 to 31 for short months. It advances =current_month= inside a getter, and =make_layout= calls it for the side effect.
+6. *Layout rebuilt every frame.* =update_display= re-splits the layout every tick.
+7. *Incoherent loop timing.* =refresh_per_second=1= against =time.sleep(0.1)=.
+8. *Dead code.* =SLEEP_HOUR=, =WAKE_HOUR=, presleep and shutdown art constants, unused imports.
+9. *Two day indexings in one function.* Monday-zero and Sunday-zero coexist in =make_week_panel=.
+10. *=is_break_time=.* Three hardcoded special cases. Deleted, not repaired. Breaks are observed, never scheduled.
+
+
+* 3. Architecture
+
+Four layers, strictly ordered. No layer reaches past the one below it.
+
+#+begin_src text
+  config.toml / calendar.toml          human-owned, read-only to the program
+          |
+     [config]        typed frozen dataclasses, validated at load
+          |
+     [schedule]      pure: (date, start, flags, config) -> list[Segment]
+          |
+     [ledger]        append-only JSONL shards, replayed into a timeline
+          |
+     [resolver]      pure: (now, segments, timeline) -> Resolved
+          |
+     [render]        Rich only, zero arithmetic
+#+end_src
+
+** Two processes
+
+| Process | Command | Role |
+|---|---|---|
+| Collector | =te collect= | Headless. Polls presence, writes the ledger, fires the end-of-day power action. Started at login. |
+| Viewer | =te= | Rich dashboard. Reads the ledger. Writes only classification, notes, flags and manual events. |
+
+The dashboard is not open all day. The collector must survive the terminal closing. There is no IPC: the ledger file is the only shared state.
+
+** Collector lifecycle
+
+- Lockfile at =state/collector.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
+- Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile, attach. Stale lock, reclaim and spawn.
+- =q= quits the viewer and leaves the collector. =Q= stops both.
+- A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
+- A console control handler (=SetConsoleCtrlHandler=) catches =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT= and writes =collector_stop= with an fsync before the process dies.
+- The collector runs across midnight without restarting. Day state is derived per tick from the current date, never captured at startup.
+
+** Subcommands
+
+=te= (viewer), =te collect=, =te stats=, =te edit=, =te day=, =te demo=, =te content lint=.
+
+** Purity rule
+
+=domain/= imports nothing from =rich= and calls no clock. =now= is always a parameter, supplied through a =Clock= protocol with =SystemClock=, =FixedClock= and =ScaledClock= implementations. This is what makes the model testable and is the single most important structural constraint in this document.
+
+
+* 4. Schedule Model
+
+** Contract
+
+| Quantity | Value |
+|---|---|
+| Weekly target | 37h00m |
+| Daily target | 7h24m |
+| Lunch | 30m, unpaid, fixed deduction |
+| Working days | Monday to Friday |
+| Breaks | Unlimited, paid, uncapped |
+| Flex band | Start between 08:00 and 09:00 |
+
+** Credit clamps
+
+Three independent clamps. None is the shift length. Exceeding 7h24m accrues normally; the daily target is a target, not a cutoff.
+
+| Clamp | Default | Effect |
+|---|---|---|
+| =earliest_credit= | 07:00 | Presence before this is displayed, never accrued |
+| =latest_credit= | 19:00 | Accrual stops regardless of presence |
+| =night_window= | 22:00 to 06:00 | Tagged =off_hours=, never accrued, asked about once |
+
+** Start-time resolution
+
+Highest priority first:
+
+1. =--start HH:MM=.
+2. First =unlock= or =resume= in today's ledger for this profile.
+3. =psutil.boot_time()= as a sanity clamp only. A first unlock earlier than boot means the ledger is inconsistent; the tracker says so rather than computing.
+4. Interactive prompt on first viewer launch of the day, defaulting to 09:00 on an empty return.
+
+Nothing is ever assumed silently.
+
+** Derived day shape
+
+Given start =S=: morning block =S= to 11:00, lunch 11:00 to 11:30, afternoon block 11:30 to =nominal_end=, where =nominal_end = S + 7h24m + 30m=.
+
+| Start | Morning | Afternoon | Nominal end |
+|---|---|---|---|
+| 08:00 | 3h00 | 4h24 | 15:54 |
+| 08:30 | 2h30 | 4h54 | 16:24 |
+| 09:00 | 2h00 | 5h24 | 16:54 |
+
+** Day flags
+
+A =dayflag= event modifies how the day is built. Set with =f= on the dashboard or =te day --flag <name>=. Flags append to the ledger like any event and supersede rather than overwrite.
+
+| Flag | Effect |
+|---|---|
+| =no-lunch= | Deduction drops to zero, =nominal_end= and sleep move 30m earlier |
+| =sick= | No target, no accrual, no sleep, credits 7h24m to the target |
+| =half-day= | Target 3h42m |
+| =offsite= | No presence expected; day reconstructed with =te edit day= |
+| =afspadsering= | Credits the target, debits the lifetime balance by hours taken |
+| =fri= | Agreed unpaid absence, target zero, balance neutral |
+
+** Weekends, holidays and leave
+
+No target, no deduction, no accrual, no sleep. Presence is still recorded and appears in stats. The dashboard switches to the free-day panel set.
+
+
+* 5. Ledger and Storage
+
+** Locations
+
+Resolved through =platformdirs=. Never the repository, never a cloud-synced path by default.
+
+| Artifact | Windows | Linux |
+|---|---|---|
+| Config | =%APPDATA%\timeexisting\= | =~/.config/timeexisting/= |
+| Ledger and state | =%LOCALAPPDATA%\timeexisting\= | =~/.local/state/timeexisting/= |
+| Diagnostic log | =...\logs\tracker.log= | =.../logs/tracker.log= |
+
+The diagnostic log is a =RotatingFileHandler=, never stdout. The ledger is never rotated or truncated and is a different file.
+
+** Sharding
+
+One file per host: =ledger/{hostname}.jsonl=, hostname from =platform.node()=. Reads merge every shard into one timeline. There is one logical ledger and one histogram across all machines. Sharding exists solely so that concurrent writers on different machines cannot corrupt a shared file, which makes a later Syncthing or private-repo sync survivable.
+
+** Event schema
+
+One JSON object per line, UTF-8, =\n= terminated.
+
+#+begin_src json
+{"v": 1, "ts": "2026-09-17T06:07:31+00:00", "host": "EXAMPLE-HOST", "profile": "work", "event": "unlock", "source": "win32", "confidence": "observed"}
+#+end_src
+
+| Field | Notes |
+|---|---|
+| =v= | Schema version. Breaking changes bump it and ship a migration in =te edit migrate=. |
+| =ts= | Aware UTC, ISO 8601. |
+| =host= | Shard name. |
+| =profile= | =work=, =fun=, =homelab=. Only =work= feeds the 37h accounting. Mapped from hostname in config. |
+| =event= | =collector_start=, =collector_stop=, =heartbeat=, =lock=, =unlock=, =suspend=, =resume=, =classify=, =note=, =dayflag=, =manual_start=, =manual_end=, =void=. |
+| =source= | =win32=, =eventlog=, =dbus=, =heartbeat=, =manual=, =backfill=. |
+| =confidence= | =observed= or =inferred=. Rendered differently, never equated. |
+
+** Heartbeat
+
+The collector appends =heartbeat= every 30 seconds while alive. A gap bounded by =lock=/=unlock= or =suspend=/=resume= is an absence. A gap with no heartbeats and no boundary events is collector downtime, a different fact, never rendered as presence or absence.
+
+** Writes and replay
+
+Append with =O_APPEND=, flush and =os.fsync= per write. Malformed lines on read are skipped, counted and logged, never fatal. The whole ledger replays into memory on start; heartbeats collapse into presence intervals and are discarded. No database. The ability to fix a line with a text editor is a feature, and =te edit= exists so that it is never necessary.
+
+
+* 6. Presence Detection
+
+The machine sleeps five minutes after the screen turns off, three on battery. Almost every real absence is therefore a sleep event, and Windows records sleep more precisely than anything else available without elevation.
+
+| Tier | Mechanism | Platform | Confidence |
+|---|---|---|---|
+| 1 | Monotonic clock versus wall clock jump per tick | All | =inferred=, one-heartbeat resolution |
+| 2 | Power-Troubleshooter Event ID 1, System log: exact sleep and wake times, readable by a normal user | Windows | =observed= |
+| 2 | Kernel-Power 42 and 107 as corroboration | Windows | =observed= |
+| 2 | =OpenInputDesktop= via =ctypes=, polled, for lock without sleep | Windows | =observed= |
+| 2 | D-Bus =org.gnome.ScreenSaver.ActiveChanged= plus =org.freedesktop.login1.PrepareForSleep= | Fedora | =observed= |
+| none | Termux | Falls back to tier 1 |
+
+Tier 1 raises the flag; tier 2 supplies the boundaries. Foreground window and input idle time are never read. Backends are a registry probed at startup.
+
+
+* 7. Absence Classification
+
+Since every absence except lunch is paid, classification never changes a number. It changes the colour of a bar in stats and nothing else. Consequently almost nothing is asked.
+
+| Gap | Class | Prompt |
+|---|---|---|
+| under 10m | =micro=, discarded | Never |
+| 10m to 25m | =break= | Never |
+| 25m to 35m | =meeting= | Never |
+| 35m to 55m | =break_long= | Never |
+| 55m to 65m | =meeting= | Never |
+| 10m+, first to overlap 11:00 to 11:30 | =lunch= | Never |
+| over 65m, not lunch | =unknown= | Queued |
+| Collector downtime while unlocked | =unknown=, unaccrued | Queued, the only one that affects arithmetic |
+| Off-hours presence | =off_hours= | Queued, one-shot: was it work? |
+
+The queue is non-blocking, retained indefinitely, and shown as a single count. =c= classifies the whole queue at once. Manual classes: =meeting=, =leisure=, =errand=, =food=, =offsite=, =unknown=.
+
+
+* 8. Recovery
+
+On collector start, read the tail of this host's shard.
+
+| Last event | Meaning | Action |
+|---|---|---|
+| =collector_stop= | Clean shutdown | No gap |
+| =heartbeat=, =lock=, =suspend= | Unclean | Classify the gap from that timestamp to now |
+| Nothing today | First run | Normal start resolution |
+
+Gap classification, rules in order, prompt only if none matches:
+
+1. Power-Troubleshooter 1 covers the gap. *Machine slept.* Backfill =suspend= and =resume= at the exact times, =observed=. No prompt.
+2. =boot_time()= inside the gap. *Machine was off.* Record =offline=, source =reboot=. No prompt.
+3. Gap under =micro=. *Collector restarted.* Fold silently.
+4. Gap opens with a =lock=. *Ordinary absence.* Section 7 applies.
+5. None of the above. *Collector downtime while unlocked.* Queue it. Unresolved gaps are =unknown= and *excluded from accrual until answered*. Unobserved time is not credited.
+
+The prompt for case 5, non-blocking, drained on =c=:
+
+#+begin_src text
+14:02 to 14:31, 29m. The ledger stopped watching and will not pretend otherwise.
+[w] I was working   [a] I was away   [r] Reboot   [?] I no longer remember
+#+end_src
+
+
+* 9. Flex Accounting
+
+** Lunch
+
+Deduction fixed at 30m. Observed start, end and duration are recorded and shown as commentary only.
+
+#+begin_src text
+Lunch  11:04 -> 11:52   deducted 30m   (actual 48m, 18m the ledger is generously ignoring)
+#+end_src
+
+** End-time drift
+
+=nominal_end= never moves. =projected_end= accounts for unaccrued gaps and does. Both are shown; the target is annotated, never relocated.
+
+| Drift past nominal | Colour |
+|---|---|
+| 0 to 30m | green |
+| 31m to 50m | amber |
+| 50m+ | crimson |
+
+** Balances
+
+Two figures, each rendered as a label plus =hh:mm:ss=. Labels: =deficit=, =surplus=, =level= (exact zero, one dedicated message).
+
+- *Week balance.* ISO week, Monday reset. Accrued minus target for elapsed working days.
+- *Lifetime balance.* From 1 September 2026, carried indefinitely, never reset, never capped. The headline number. Paid leave credits full days, so it measures position against contractual expectation, not hours owed.
+
+** Recovery estimate
+
+When the week balance is negative: =deficit / remaining_working_days=, shown as minutes per day. Suppressed on Friday afternoon.
+
+** Leaving early
+
+A =z= sleep or a manual end before target records the shortfall as a deficit. The commentary is free to call the same minutes reclaimed.
+
+
+* 10. Power
+
+The original purpose of the program, restored. Windows only. Other platforms get a no-op backend and the documented consequence that a work-profile day on the gaming rig would otherwise sleep it after 7h24m.
+
+#+begin_src toml
+[power]
+action        = "sleep"          # none | notify | lock | sleep
+trigger       = "target_reached" # 7h24m of accrued credit plus the lunch deduction
+warning       = "5m"             # countdown panel opens this far before
+postpone      = "15m"            # any key postpones once by this much
+postpone_max  = 1                # then it takes you
+weekends      = false
+holidays      = false
+sick          = false
+#+end_src
+
+Sequence on trigger: countdown panel, one permitted postponement, then =manual_end=, =collector_stop=, fsync, then =SetSuspendState= via =ctypes= on =powrprof.dll=. The ledger is closed before the machine goes down.
+
+=SetSuspendState= hibernates instead of sleeping whenever hibernation is enabled, regardless of its first argument. Startup runs =powercfg /a= and warns if hibernation is available; the fix is =powercfg /h off= once.
+
+Sleep initiated by the user or by the idle policy needs no handling. The collector freezes mid-tick and recovery (section 8, rule 1) backfills the exact boundaries from the event log on resume.
+
+
+* 11. Calendar
+
+=calendar.toml=, human-owned. Base public holidays from the =holidays= package, locale =DK=, pinned recent: Store Bededag was abolished in 2024 and older releases produce a phantom April holiday.
+
+ACME additionally observes 5 June, 24 December and 31 December. These go in =[holidays.add]=.
+
+Tables: =[holidays.add]=, =[holidays.remove]=, =[ferie]=, =[sygdom]=, =[afspadsering]=, =[fri]=. Date ranges, single dates, and partial days as a date plus an hour count.
+
+| Class | Target | Balance |
+|---|---|---|
+| =ferie= | Credits 7h24m | Neutral |
+| =helligdag= | Credits 7h24m | Neutral |
+| =sygdom= | Credits 7h24m | Neutral |
+| =afspadsering= | Credits 7h24m | Debits hours taken |
+| =fri= | Zero | Neutral |
+
+
+* 12. Interaction
+
+** Keys
+
+=readchar= on a daemon thread into a queue, drained by the render loop. Anything needing the full terminal calls =live.stop()= first.
+
+| Key | Action |
+|---|---|
+| =c= | Classify queued absences |
+| =f= | Set a day flag |
+| =s= | Stats for the current week |
+| =n= | Note at the current timestamp |
+| =z= | Sleep now, recording the shortfall |
+| =r= | Reload config and calendar |
+| =q= / =Q= | Quit viewer / quit viewer and collector |
+| =?= | Key help. The postpone key is deliberately absent from it. |
+
+** Notifications
+
+First available wins: =windows-toasts= (WinRT), =notify-send=, then terminal bell plus a coloured panel.
+
+| Trigger | When |
+|---|---|
+| Kitchen window | 13:30, repeated 14:00, suppressed after 14:30 |
+| Target reached | Once, alongside the countdown |
+| Drift crosses amber, then crimson | Once each |
+
+** Single instance
+
+Per host and per role. One collector and one viewer per machine. Running on the laptop and the Fedora box simultaneously is legitimate.
+
+#+begin_src text
+An instance already endures. There is only one of you, and it is already suffering.
+#+end_src
+
+
+* 13. Stats
+
+=te stats [--week|--month|--year|--all]=, later bound to =s=. One stacked column per day, Unicode block elements. A horizontal rule at 7h24m. Weekend, holiday and leave columns tinted as free.
+
+| Segment | Colour |
+|---|---|
+| Accrued work | green scale |
+| Meeting | blue |
+| Lunch | yellow |
+| Break | dim grey |
+| Sick day | pale teal |
+| Off-hours | magenta |
+| Unknown gap | hatched red |
+
+Secondary panels: weekly totals against 37h, lifetime sparkline, start-time distribution, observed lunch length against the 30m deduction. All stats read the merged multi-host timeline.
+
+
+* 14. Content Framework
+
+Voice, locale and palette are three independent config keys. Every user-visible string, including errors and key hints, goes through the pack loader from phase 0 onward.
+
+#+begin_src text
+content/
+  voices/{grimdark,tau,hygge}/{en,da,fr,es,zh}.toml
+  palettes/{grimdark,tau,hygge}.toml
+#+end_src
+
+Resolution falls back voice+locale, then voice+en, then grimdark+en, and never crashes on a missing key. Pools are lists, selected through a shuffled deque per key, refilled on exhaustion. =te content lint= reports every key present in the reference pack and absent elsewhere. ASCII art is voice-scoped, not locale-scoped.
+
+Only grimdark English is populated. Other packs exist with the key skeleton and empty pools. Translation and theming are the last phase.
+
+Register for grimdark: cynical, dystopian, fond of "nothing you do here matters". Not cruel about the actual employer. Illness is the one thing it does not mock.
+
+New pools required: holiday, vacation, sick, afspadsering, drift (three bands), balance deficit, balance surplus, level, countdown, postponed, early exit, off-hours question, downtime question, kitchen window, single instance.
+
+
+* 15. Configuration
+
+#+begin_src toml
+version = 1
+
+[contract]
+weekly_target = "37h00m"
+daily_target  = "7h24m"
+working_days  = ["mon", "tue", "wed", "thu", "fri"]
+
+[lunch]
+window_start = 11:00
+window_end   = 11:30
+deduction    = "30m"
+min_minutes  = 10
+
+[credit]
+earliest      = 07:00
+latest        = 19:00
+night_start   = 22:00
+night_end     = 06:00
+default_start = 09:00
+
+[absence]
+micro_max         = "10m"
+meeting_slots     = ["30m", "60m"]
+meeting_tolerance = "5m"
+ask_above         = "65m"
+
+[drift]
+green_max = "30m"
+amber_max = "50m"
+
+[collector]
+heartbeat = "30s"
+poll      = "30s"
+
+[notify]
+kitchen_start  = 13:30
+kitchen_repeat = 14:00
+kitchen_end    = 14:30
+
+[display]
+timezone   = "Europe/Copenhagen"
+refresh_hz = 1
+voice      = "grimdark"
+locale     = "en"
+palette    = "grimdark"
+
+[profiles]
+default = "fun"
+hosts   = { "EXAMPLE-HOST" = "work" }
+#+end_src
+
+Plus the =[power]= table from section 10. Read with =tomllib= into frozen dataclasses. Unknown keys are an error. A config error prints to stderr and exits before any Rich surface exists. The program never rewrites config.
+
+
+* 16. Phases
+
+Each phase is one implementation session and leaves the program working. No phase begins before its predecessor's tests pass.
+
+| Phase | Content | Ships |
+|---|---|---|
+| 0 | Migrate =_legacy.py= into the package, fix all ten defects, =Clock= protocol, pack loader, =theme.py=, tests for the phase resolver, delete =_legacy.py= | Same behaviour, correct, structured |
+| 1 | Config, schedule builder, resolver, =--at= and =--speed=, new hours, day flags | Working tracker, no ledger |
+| 2 | Collector, heartbeat, shards, replay, lockfile, platform dirs, logging, startup script, control handler | Persistence |
+| 3 | Sleep and lock detection, monotonic jump, event log, recovery | Absences are real |
+| 4 | Flex balances, calendar, leave, drift, recovery estimate, classification rules and queue | The 37h answer |
+| 5 | Power module, countdown, postponement, =z=, hibernation check | The original purpose |
+| 6 | =te stats=, histograms, =s= key | The Fabric-shaped part |
+| 7 | =te edit= | Corrections without hand-editing |
+| 8 | Demo carousel on =ScaledClock=, notifications, key help, full grimdark content pass | Polish |
+| 9 | Additional voices, palettes, locales | Last, by design |
+
+
+* 17. The Editor
+
+Corrections are appended, never rewritten in place. A correction is a =void= or =classify= event referencing an earlier event id; replay applies supersessions. Every invocation backs up affected shards for thirty days. Dry run by default for anything touching more than one event; =--apply= commits.
+
+| Command | Purpose |
+|---|---|
+| =te edit list --date D= | Resolved day with event ids |
+| =te edit add --unlock HH:MM --date D= | Backfill |
+| =te edit classify ID --class C --note ""= | Classify |
+| =te edit split ID --at HH:MM= | Split an absence |
+| =te edit void ID --reason ""= | Supersede as invalid |
+| =te edit day --date D --start HH:MM --end HH:MM --flag F= | Reconstruct a whole day |
+| =te edit verify= | Integrity across shards |
+| =te edit migrate= | Schema upgrade |
+
+
+* 18. Open Questions
+
+| Question | Route |
+|---|---|
+| Hostnames and profiles for the gaming rig and the Fedora box | Self-answerable, fill =[profiles.hosts]= |
+| Old GitHub repository holding the 600-line version | Archive it |
+
+
+* 19. Conventions for the Implementing Agent
+
+- Python 3.14. =pathlib=, =tomllib=, =zoneinfo=, =enum.StrEnum=, =@dataclass(frozen=True, slots=True)=, =match= in the renderer, =divmod= over =math.floor=. Lazy annotations are default; no =from __future__ import annotations=.
+- PowerShell 7 for any script. No 5.1 compatibility.
+- Aware UTC for storage and arithmetic; =Europe/Copenhagen= only at the render boundary. 25 October 2026 must not move a stored timestamp.
+- =domain/= imports nothing from =rich= and never calls a clock.
+- Every colour string in =ui/theme.py=. Every user-visible string through the pack loader.
+- =importlib.resources= for assets, never =__file__= arithmetic. No module-level side effects.
+- Filenames under =assets/ascii_art/= are canonical.
+- Full replacement files, not fragments. One concrete step, then stop for review.
+- No hard-wrapped prose, no full justification.
+- Every behaviour arrives with a test. The resolver suite is the contract.
+- =ruff check .= and =pytest= pass before every commit.

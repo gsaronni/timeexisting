@@ -1,0 +1,69 @@
+:PROPERTIES:
+:ID:       d4a91f3c-8b27-4e6a-b5c0-91e3f7a2d658
+:END:
+#+TITLE: timeexisting Session Log
+#+DATE: 2026-09-18
+#+FILETAGS: :python:timeexisting:log:
+
+* Purpose
+
+One entry per working session, newest first. What was asked, what came back, what was rejected, what carried over. Written at the end of each session, by the agent when one was used and corrected by hand, by hand otherwise. The roadmap is the plan; this is the record.
+
+Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneline phase-0..phase-1= is the changelog for phase 1.
+
+* Phase status
+
+| Phase | Status | Tag | Notes |
+|---|---|---|---|
+| 0 | complete | =phase-0= | prompt at =docs/phase-0-prompt.md= |
+| 1 | not started | | prompt at =docs/phase-1-prompt.md= |
+| 2 | | | |
+| 3 | | | |
+| 4 | | | |
+| 5 | | | |
+| 6 | | | |
+| 7 | | | |
+| 8 | | | |
+| 9 | | | |
+
+* Entries
+
+** 2026-09-18, phase 0: migration, defect fixes, content and theme plumbing
+
+*Asked:* execute =docs/phase-0-prompt.md=. Migrate =_legacy.py= into the package structure, fix
+every known defect, put content and theme plumbing in place, no feature or schedule-model
+changes.
+
+*Done:* full package split — =content/art.py= (manifest plus =importlib.resources= loader with
+startup validation), =content/phrases.py= (pack loader with fallback chain and shuffled-deque
+selection), every legacy message table moved into =content/voices/grimdark/en.toml=,
+=ui/theme.py= (every colour literal, loaded from =content/palettes/grimdark.toml=),
+=ui/panels/{header,year,week,day}.py=, =ui/layout.py= built once, =ui/app.py= with the =Live=
+loop and clean shutdown, =domain/clock.py= (=Clock= protocol with =SystemClock=, =FixedClock=,
+=ScaledClock=), =domain/phases.py= (stopgap =Phase= StrEnum and pure resolver for the legacy day
+shape), =cli.py= (argparse surface, =--at= and =--demo=) with =__main__.py= delegating to it.
+All 13 listed defects fixed, including the =match=-based rewrite of the indentation bug, the
+asset path and filename-drift corrections, the narrowed =except OSError=, deletion of
+=ShowcaseState=, one-cadence loop timing, dead-code removal, standardised =date.weekday()=
+indexing, and the double-Ctrl+C crash fix. =_legacy.py= deleted. =ruff check .= clean, =pytest=
+67 passed.
+
+*Rejected:* nothing beyond scope; no features added ahead of phase 1.
+
+*Observed:* work landed uncommitted on =master= across this and a prior session; committed and
+tagged =phase-0= as part of closing this entry out.
+
+*Carried over:* phase 1 (schedule model, configuration, day flags, demo carousel) — prompt at
+=docs/phase-1-prompt.md=.
+
+** 2026-09-17, scaffold
+
+*Asked:* stand up the repository from a clean slate at =proj\te=, src layout, package =timeexisting=, CLI =te=, Python 3.14.
+
+*Done:* directory tree, =pyproject.toml= with hatchling and ruff and pytest configuration, =.gitignore= excluding the ledger, =.gitattributes= forcing LF, pre-commit hooks installed, CI workflow, =README.org=, =CLAUDE.md=, legacy script and art copied in from =ACME= commit =80dcd26=. =pip install -e ".[dev,windows]"= succeeds, =importlib.resources= finds all 16 art files, =ruff check .= clean. Roadmap, structure explanation and phase 0 prompt written to =docs/=.
+
+*Rejected:* the history-preserving extraction via =git filter-repo=; the helper script approach. Both replaced by a clean start.
+
+*Observed:* legacy script runs from the new location but every art panel is blank (loader path is one level short) and a double Ctrl+C crashes the exit handler. Both recorded as phase 0 defects 11 and 12.
+
+*Carried over:* first push to GitHub; =pre-commit autoupdate= to clear the deprecated stage-name warning; run phase 0.

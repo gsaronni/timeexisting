@@ -15,6 +15,7 @@ dependencies = [
     "psutil>=5.9",
     "readchar>=4.1",
     "holidays>=0.57",
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -38,9 +39,6 @@ src            = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PTH", "DTZ", "ARG", "C4", "RET"]
 ignore = ["E501"]
-
-[tool.ruff.lint.per-file-ignores]
-"src/timeexisting/_legacy.py" = ["ALL"]
 
 [tool.pytest.ini_options]
 testpaths      = ["tests"]

@@ -87,6 +87,8 @@ def _build_contract(table: dict) -> ContractConfig:
         weekly_target=parse_duration(_field(table, "weekly_target", "contract")),
         daily_target=parse_duration(_field(table, "daily_target", "contract")),
         working_days=tuple(_field(table, "working_days", "contract")),
+        flex_start=parse_clock_time(_field(table, "flex_start", "contract")),
+        flex_end=parse_clock_time(_field(table, "flex_end", "contract")),
     )
 
 

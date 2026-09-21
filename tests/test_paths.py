@@ -11,5 +11,9 @@ def test_ledger_and_logs_live_under_state_dir():
     assert paths.log_file() == paths.logs_dir() / "tracker.log"
 
 
-def test_config_dir_and_state_dir_are_distinct():
+def test_config_dir_and_state_dir_are_distinct(monkeypatch):
+    # This is specifically about the real platformdirs resolution (Windows
+    # collapses config and state to the same folder without appauthor=False,
+    # roaming=True) so it lifts the autouse isolation for just this test.
+    monkeypatch.undo()
     assert paths.config_dir() != paths.state_dir()

@@ -41,6 +41,8 @@ class ContractConfig:
     weekly_target: timedelta
     daily_target: timedelta
     working_days: tuple[str, ...]
+    flex_start: time
+    flex_end: time
 
 
 @dataclass(frozen=True, slots=True)

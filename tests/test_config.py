@@ -8,15 +8,15 @@ from timeexisting.config import loader
 from timeexisting.config.models import ConfigError, parse_clock_time, parse_duration
 
 
-def test_defaults_load(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "does-not-exist.toml")
-
+def test_defaults_load():
     config = loader.load_config()
 
     assert config.version == 1
     assert config.contract.weekly_target == timedelta(hours=37)
     assert config.contract.daily_target == timedelta(hours=7, minutes=24)
     assert config.contract.working_days == ("mon", "tue", "wed", "thu", "fri")
+    assert config.contract.flex_start == time(8, 0)
+    assert config.contract.flex_end == time(9, 0)
     assert config.lunch.window_start == time(11, 0)
     assert config.lunch.deduction == timedelta(minutes=30)
     assert config.credit.default_start == time(9, 0)
@@ -81,15 +81,6 @@ def test_overlay_overrides_one_value_and_leaves_the_rest(tmp_path, monkeypatch):
     assert config.display.voice == "hygge"
     assert config.display.locale == "en"
     assert config.display.palette == "grimdark"
-    assert config.contract.weekly_target == timedelta(hours=37)
-
-
-def test_missing_overlay_file_yields_pure_defaults(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "does-not-exist.toml")
-
-    config = loader.load_config()
-
-    assert config.display.voice == "grimdark"
     assert config.contract.weekly_target == timedelta(hours=37)
 
 

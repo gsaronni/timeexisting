@@ -1,0 +1,26 @@
+:PROPERTIES:
+:ID:       9f4c2d71-6a38-4e05-b1c7-2d90ef53a4c1
+:END:
+#+TITLE: timeexisting
+#+DATE: 2026-09-17
+#+FILETAGS: :python:timeexisting:
+
+* What this is
+
+A personal work-time tracker that accrues hours against a 37 hour week, records presence from operating system lock and sleep events, and presents the result with as little encouragement as possible.
+
+It began as four lines of PowerShell that hibernated a laptop at 18:00. That behaviour is being restored as a feature.
+
+* Install
+
+#+begin_src powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,windows]"
+pre-commit install
+te --help
+#+end_src
+
+* Specification
+
+See =docs/timeexisting-roadmap.org=. That file is the contract, this one is the front door.

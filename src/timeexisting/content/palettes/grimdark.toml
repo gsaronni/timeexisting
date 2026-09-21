@@ -1,1 +1,51 @@
-# placeholder
+# grimdark palette — the reference palette. Every other palette falls back
+# to this one when it does not define a role.
+
+[roles]
+header_border      = "yellow"
+header_text        = "yellow"
+header_subtitle    = "bold yellow"
+muted              = "dim"
+emphasis           = "italic"
+year_footer        = "dim red"
+footer             = "dim yellow"
+weekend_title      = "bold magenta"
+weekend_message    = "italic cyan"
+clock              = "cyan"
+countdown          = "yellow"
+countdown_emphasis = "bold yellow"
+post_work_message  = "italic green"
+next_break         = "dim cyan"
+danger             = "bold red"
+
+[season]
+Winter = "blue"
+Spring = "green"
+Summer = "yellow"
+Fall   = "dark_orange3"
+
+# Keyed to date.weekday(): Monday = 0 .. Sunday = 6.
+[weekday]
+"0" = "red"      # Monday
+"1" = "yellow3"  # Tuesday
+"2" = "yellow"   # Wednesday
+"3" = "cyan"     # Thursday
+"4" = "green"    # Friday
+"5" = "magenta"  # Saturday
+"6" = "blue"     # Sunday
+
+[break]
+morning   = "yellow"
+lunch     = "green"
+afternoon = "cyan"
+
+[phase]
+pre_work  = "blue"
+work      = "cyan"
+post_work = "green"
+weekend   = "magenta"
+
+[progress]
+low  = "red"
+mid  = "yellow"
+high = "green"

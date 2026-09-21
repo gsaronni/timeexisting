@@ -1,1 +1,138 @@
-# placeholder
+# grimdark / en — the reference pack. Every other voice and locale falls
+# back to this one when a key is missing. Cynical, dystopian, fond of
+# "nothing you do here matters", never cruel about the actual employer.
+
+[header]
+subtitle = ["The Existential Progress Tracker: Because Tracking Your Slow Descent Into Madness Is Important"]
+
+[app]
+starting = ["Starting Existential Time Tracker..."]
+footer = ["Tracking the inevitable passage of time... (Press Ctrl+C to escape)"]
+interrupted = ["Progress tracking interrupted. The corporate overlords are displeased, but your soul is momentarily liberated."]
+demo_label = ["DEMO MODE"]
+
+[common]
+current_time = ["Current time: {time}"]
+
+[existential]
+"0" = ["The void stares back as you click away your existence..."]
+"1" = ["Each keystroke brings you microscopically closer to freedom..."]
+"2" = ["Time moves slower within the corporate dimension..."]
+"3" = ["The pixels on your screen slowly consume your soul..."]
+"4" = ["Another day in the capitalist machinery..."]
+"5" = ["Your productivity is inversely proportional to your will to live..."]
+"6" = ["Somewhere, somehow, a spreadsheet is being updated..."]
+"7" = ["The fluorescent lights flicker in sympathy with your spirit..."]
+"8" = ["Your dreams wait patiently outside, growing ever dimmer..."]
+"9" = ["Coffee: the elixir that transforms despair into productivity..."]
+
+[month]
+"1" = ["January: False hope of new beginnings in the dead of winter. The year stretches before you like an endless void."]
+"2" = ["February: Time compresses in this truncated month, yet the weight of existence remains unbearably constant."]
+"3" = ["March: Nature awakens while your spirit remains dormant, frozen in the permafrost of routine."]
+"4" = ["April: Rain washes away winter's remnants, but nothing can cleanse the stains of past regrets."]
+"5" = ["May: The blossoms of possibility bloom briefly before withering under reality's harsh glare."]
+"6" = ["June: Solstice approaches, the longest day only emphasizes how short life truly is."]
+"7" = ["July: The inferno of summer mirrors the burning of time slipping through your fingers."]
+"8" = ["August: Summer's death rattle echoes across sun-scorched days as autumn's shadow looms."]
+"9" = ["September: The year begins its inexorable decline, leaves falling like abandoned dreams."]
+"10" = ["October: As nature dons its death shroud, we confront our own impermanence."]
+"11" = ["November: Barren trees stand like memento mori against gray skies, reminding us of what we've lost."]
+"12" = ["December: The year gasps its final breaths as we delude ourselves that the next will somehow be different."]
+
+[season]
+Winter = ["Winter: The barren landscape mirrors the frozen ambitions within your soul as time crystallizes into meaningless iterations."]
+Spring = ["Spring: Nature's cruel joke of renewal, giving false hope while your tasks multiply like weeds in corporate soil."]
+Summer = ["Summer: The sun's oppressive glare exposes the futility of your efforts as others pretend to enjoy their fleeting vacation escapes."]
+Fall = ["Fall: As leaves wither and die, so too do your dreams of advancement and purpose in this corporate wasteland."]
+
+# Keyed to date.weekday(): Monday = 0 .. Sunday = 6.
+[weekday]
+"0" = ["Monday: As the first chains of the week shackle you to your desk, remember: only 96 hours of corporate servitude remain."]
+"1" = ["Tuesday: The illusion of progress sets in as you trudge through the wasteland of meetings and deadlines."]
+"2" = ["Wednesday: Balanced on the knife-edge of the week, neither here nor there, just like your career aspirations."]
+"3" = ["Thursday: So close to freedom, yet the hours stretch like an existential void. The weekend's siren song grows louder."]
+"4" = ["Friday: As the corporate prison prepares for weekend lockdown, enjoy your brief taste of impending freedom."]
+"5" = ["Saturday: Temporary liberation that passes all too quickly. The clock is already ticking toward Monday's inevitable return."]
+"6" = ["Sunday: The dread of tomorrow poisons today's fleeting freedom. Savor these final moments of self-delusion."]
+
+[year]
+panel_title = ["ANNUAL EXISTENTIAL METER"]
+footer = ["Only {days_left} days left to endure this year..."]
+
+[week]
+panel_title = ["WEEKLY SOUL DRAIN"]
+workday_status = ["{percent}% of the workweek complete"]
+weekend_status = ["Weekend: A brief respite in the void"]
+
+[week.footer]
+countdown = ["Only {days_left} more days until temporary weekend freedom..."]
+saturday = ["Sunday's existential dread approaches..."]
+sunday = ["The abyss of Monday looms just hours away..."]
+
+[weekend]
+heading = ["🌈 WEEKEND VIBES"]
+footer = ["Time is a construct. Waste it wisely."]
+panel_title = ["EXISTENTIAL WEEKEND MODE"]
+
+[break]
+panel_title = ["BREAK TIME"]
+time_remaining = ["Time remaining: {minutes} minutes"]
+
+[break.morning]
+heading = ["☕ MORNING BREAK"]
+label = ["Morning Break"]
+message = ["Quick! Pretend to enjoy this mandatory wellness break..."]
+
+[break.lunch]
+heading = ["🍽️ LUNCH BREAK"]
+label = ["Lunch"]
+message = ["One hour to consume sustenance and pretend you have a life outside these walls..."]
+
+[break.afternoon]
+heading = ["☕ AFTERNOON BREAK"]
+label = ["Afternoon Break"]
+message = ["The afternoon slump demands its caffeinated sacrifice..."]
+
+[pre_work]
+panel_title = ["PRE-WORK TRANQUILITY"]
+message = ["""☕ Cherish this brief moment of freedom before
+the corporate machine claims your soul."""]
+countdown = ["Work begins in: {hh:02d}:{mm:02d}:{ss:02d}"]
+
+[post_work]
+panel_title = ["POST-WORK LIBERATION"]
+message = ["""🌅 Your daily contribution to capitalism is complete.
+Temporary freedom awaits, until tomorrow's cycle."""]
+completed_at = ["Work completed at: {hh:02d}:00"]
+
+[work]
+panel_title = ["DAILY CORPORATE SENTENCE"]
+progress = ["Progress: {percentage}% Complete"]
+remaining = ["Remaining: {hh:02d}:{mm:02d}:{ss:02d}"]
+status = ["Status: {anim} {message}"]
+next_break = ["☕ Next break in: {minutes} minutes ({label})"]
+
+[weekend_activity.gaming]
+message = ["🎮 Escaping reality through digital worlds, because this one disappointed you..."]
+
+[weekend_activity.intimate]
+message = ["💕 Seeking fleeting connection in a disconnected world..."]
+
+[weekend_activity.reading]
+message = ["📚 Filling your mind with others' thoughts to avoid confronting your own..."]
+
+[weekend_activity.sleep]
+message = ["😴 Unconsciousness: the only true escape from existential dread..."]
+
+[weekend_activity.surf]
+message = ["🏄 Balancing on a wave that doesn't care whether you fall, a refreshing change from the desk that doesn't either..."]
+
+[weekend_activity.mtb]
+message = ["🚵 Pedaling furiously to nowhere, a perfect metaphor for life..."]
+
+[weekend_activity.fencing]
+message = ["🤺 Lunging at another person with a sword, the only socially sanctioned aggression left to you..."]
+
+[weekend_activity.chess]
+message = ["♟️ Sacrificing pieces you pretended to value, a Tuesday-evening rehearsal for Monday..."]

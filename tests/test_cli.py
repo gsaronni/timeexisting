@@ -116,3 +116,25 @@ def test_config_init_does_not_overwrite_an_existing_file(capsys, tmp_path, monke
 
     assert target.read_text(encoding="utf-8") == "custom = true\n"
     assert "already exists" in capsys.readouterr().out
+
+
+def test_config_check_prints_ok_and_the_path_on_success(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "does-not-exist.toml")
+
+    cli.main(["config", "check"])
+
+    assert capsys.readouterr().out.strip() == f"ok {tmp_path / 'does-not-exist.toml'}"
+
+
+def test_config_check_prints_the_error_to_stderr_and_exits_2_on_failure(capsys, tmp_path, monkeypatch):
+    overlay = tmp_path / "config.toml"
+    overlay.write_text('[display]\nnonexistent = "x"\n', encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: overlay)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["config", "check"])
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unknown config key: display.nonexistent" in captured.err

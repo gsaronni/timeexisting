@@ -1,10 +1,13 @@
 """The argparse surface. Parses arguments and dispatches; no logic lives here."""
 
 import argparse
+import sys
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 
 from timeexisting import paths
+from timeexisting.config import loader
+from timeexisting.config.models import ConfigError
 from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock, FixedClock, SystemClock
 from timeexisting.ui.app import local_timezone, run, run_demo
@@ -93,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
     config_subparsers.add_parser("path", help="Print the resolved config file path.")
     config_subparsers.add_parser("init", help="Write the packaged defaults there if absent.")
+    config_subparsers.add_parser("check", help="Load and validate the configuration.")
 
     return parser
 
@@ -118,11 +122,22 @@ def _config_init() -> None:
     print(f"Wrote defaults to {target}")
 
 
+def _config_check() -> None:
+    try:
+        loader.load_config()
+    except ConfigError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(2) from error
+    print(f"ok {paths.config_file()}")
+
+
 def _run_config_command(command: str) -> None:
     if command == "path":
         _config_path()
     elif command == "init":
         _config_init()
+    elif command == "check":
+        _config_check()
 
 
 def main(argv: list[str] | None = None) -> None:

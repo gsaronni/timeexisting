@@ -417,17 +417,17 @@ daily_target  = "7h24m"
 working_days  = ["mon", "tue", "wed", "thu", "fri"]
 
 [lunch]
-window_start = 11:00
-window_end   = 11:30
+window_start = 11:00:00
+window_end   = 11:30:00
 deduction    = "30m"
 min_minutes  = 10
 
 [credit]
-earliest      = 07:00
-latest        = 19:00
-night_start   = 22:00
-night_end     = 06:00
-default_start = 09:00
+earliest      = 07:00:00
+latest        = 19:00:00
+night_start   = 22:00:00
+night_end     = 06:00:00
+default_start = 09:00:00
 
 [absence]
 micro_max         = "10m"
@@ -444,9 +444,9 @@ heartbeat = "30s"
 poll      = "30s"
 
 [notify]
-kitchen_start  = 13:30
-kitchen_repeat = 14:00
-kitchen_end    = 14:30
+kitchen_start  = 13:30:00
+kitchen_repeat = 14:00:00
+kitchen_end    = 14:30:00
 
 [display]
 timezone   = "Europe/Copenhagen"

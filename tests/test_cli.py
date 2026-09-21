@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from timeexisting import cli
+from timeexisting import cli, paths
 from timeexisting.domain.clock import FixedClock, SystemClock
 
 
@@ -86,3 +86,33 @@ def test_demo_flag_parses_and_is_dispatched_outside_build_clock():
     clock, label = cli._build_clock(args)
     assert isinstance(clock, SystemClock)
     assert label == ""
+
+
+def test_config_path_prints_the_resolved_path(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "config.toml")
+
+    cli.main(["config", "path"])
+
+    assert capsys.readouterr().out.strip() == str(tmp_path / "config.toml")
+
+
+def test_config_init_writes_defaults_when_absent(capsys, tmp_path, monkeypatch):
+    target = tmp_path / "nested" / "config.toml"
+    monkeypatch.setattr(paths, "config_file", lambda: target)
+
+    cli.main(["config", "init"])
+
+    assert target.is_file()
+    assert "weekly_target" in target.read_text(encoding="utf-8")
+    assert "Wrote defaults" in capsys.readouterr().out
+
+
+def test_config_init_does_not_overwrite_an_existing_file(capsys, tmp_path, monkeypatch):
+    target = tmp_path / "config.toml"
+    target.write_text("custom = true\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: target)
+
+    cli.main(["config", "init"])
+
+    assert target.read_text(encoding="utf-8") == "custom = true\n"
+    assert "already exists" in capsys.readouterr().out

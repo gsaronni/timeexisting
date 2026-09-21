@@ -1,0 +1,63 @@
+# The reference configuration — roadmap section 15, plus [power] from
+# section 10. Every key here is the schema: a user config.toml may only
+# override keys already present in this file.
+
+version = 1
+
+[contract]
+weekly_target = "37h00m"
+daily_target  = "7h24m"
+working_days  = ["mon", "tue", "wed", "thu", "fri"]
+
+[lunch]
+window_start = 11:00:00
+window_end   = 11:30:00
+deduction    = "30m"
+min_minutes  = 10
+
+[credit]
+earliest      = 07:00:00
+latest        = 19:00:00
+night_start   = 22:00:00
+night_end     = 06:00:00
+default_start = 09:00:00
+
+[absence]
+micro_max         = "10m"
+meeting_slots     = ["30m", "60m"]
+meeting_tolerance = "5m"
+ask_above         = "65m"
+
+[drift]
+green_max = "30m"
+amber_max = "50m"
+
+[collector]
+heartbeat = "30s"
+poll      = "30s"
+
+[notify]
+kitchen_start  = 13:30:00
+kitchen_repeat = 14:00:00
+kitchen_end    = 14:30:00
+
+[display]
+timezone   = "Europe/Copenhagen"
+refresh_hz = 1
+voice      = "grimdark"
+locale     = "en"
+palette    = "grimdark"
+
+[profiles]
+default = "fun"
+hosts   = { "EXAMPLE-HOST" = "work" }
+
+[power]
+action       = "sleep"          # none | notify | lock | sleep
+trigger      = "target_reached" # 7h24m of accrued credit plus the lunch deduction
+warning      = "5m"             # countdown panel opens this far before
+postpone     = "15m"            # any key postpones once by this much
+postpone_max = 1                # then it takes you
+weekends     = false
+holidays     = false
+sick         = false

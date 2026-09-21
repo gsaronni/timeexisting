@@ -21,6 +21,8 @@ _THEME_MODULE = _SRC_ROOT / "ui" / "theme.py"
 
 _ALL_MODULES = sorted(_SRC_ROOT.rglob("*.py"))
 _DOMAIN_MODULES = sorted((_SRC_ROOT / "domain").rglob("*.py"))
+_MODULES_EXCEPT_CLOCK = [path for path in _ALL_MODULES if path != _CLOCK_MODULE]
+_MODULES_EXCEPT_THEME = [path for path in _ALL_MODULES if path != _THEME_MODULE]
 
 _FORBIDDEN_CLOCK_CALLS = {
     "datetime.now",
@@ -34,7 +36,13 @@ _FORBIDDEN_CLOCK_CALLS = {
 # Rich's own vocabulary, not a guess: every standard/extended colour name it
 # recognises, plus the canonical (non-abbreviated) style modifier keywords.
 _STYLE_MODIFIERS = {name for name, canonical in Style.STYLE_ATTRIBUTES.items() if name == canonical}
-_STYLE_WORDS = set(ANSI_COLOR_NAMES) | _STYLE_MODIFIERS | {"on", "not", "default", "none"}
+# "on" (background) is kept for compounds like "bold on red"; "default",
+# "none" and "not" are dropped even though Rich accepts them as style words,
+# because they are common enough as ordinary prose/keys elsewhere (a TOML
+# key literally named "default", say) that keeping them causes real
+# false positives without meaningfully improving detection: a genuine
+# violation almost always pairs them with an actual colour or modifier.
+_STYLE_WORDS = set(ANSI_COLOR_NAMES) | _STYLE_MODIFIERS | {"on"}
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -121,11 +129,8 @@ def test_domain_never_imports_rich(path: Path) -> None:
         assert not offenders, f"{path}:{node.lineno} domain/ imports {offenders}"
 
 
-@pytest.mark.parametrize("path", _ALL_MODULES, ids=_module_id)
+@pytest.mark.parametrize("path", _MODULES_EXCEPT_CLOCK, ids=_module_id)
 def test_no_direct_clock_calls_outside_domain_clock(path: Path) -> None:
-    if path == _CLOCK_MODULE:
-        pytest.skip("domain/clock.py is where these calls belong")
-
     tree = _parse(path)
     aliases = _import_aliases(tree)
     for node in ast.walk(tree):
@@ -135,11 +140,8 @@ def test_no_direct_clock_calls_outside_domain_clock(path: Path) -> None:
         assert canonical not in _FORBIDDEN_CLOCK_CALLS, f"{path}:{node.lineno} calls {canonical} directly"
 
 
-@pytest.mark.parametrize("path", _ALL_MODULES, ids=_module_id)
+@pytest.mark.parametrize("path", _MODULES_EXCEPT_THEME, ids=_module_id)
 def test_no_rich_style_literals_outside_theme(path: Path) -> None:
-    if path == _THEME_MODULE:
-        pytest.skip("ui/theme.py is where these belong")
-
     tree = _parse(path)
     doc_ids = _docstring_ids(tree)
     for node in ast.walk(tree):

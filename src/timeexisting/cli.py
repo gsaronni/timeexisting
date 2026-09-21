@@ -2,7 +2,9 @@
 
 import argparse
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 
+from timeexisting import paths
 from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock, FixedClock, SystemClock
 from timeexisting.ui.app import local_timezone, run, run_demo
@@ -85,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Cycle through a carousel of fixed states: every phase and every month.",
     )
+
+    subparsers = parser.add_subparsers(dest="command")
+    config_parser = subparsers.add_parser("config", help="Manage the configuration file.")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
+    config_subparsers.add_parser("path", help="Print the resolved config file path.")
+    config_subparsers.add_parser("init", help="Write the packaged defaults there if absent.")
+
     return parser
 
 
@@ -94,8 +103,33 @@ def _build_clock(args: argparse.Namespace) -> tuple[Clock, str]:
     return SystemClock(), ""
 
 
+def _config_path() -> None:
+    print(paths.config_file())
+
+
+def _config_init() -> None:
+    target = paths.config_file()
+    if target.exists():
+        print(f"Config already exists at {target}")
+        return
+    defaults = files("timeexisting").joinpath("config").joinpath("defaults.toml")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(defaults.read_bytes())
+    print(f"Wrote defaults to {target}")
+
+
+def _run_config_command(command: str) -> None:
+    if command == "path":
+        _config_path()
+    elif command == "init":
+        _config_init()
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command == "config":
+        _run_config_command(args.config_command)
+        return
     if args.demo:
         run_demo(_demo_scenarios(SystemClock().now()))
         return

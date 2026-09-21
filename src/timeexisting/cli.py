@@ -4,14 +4,14 @@ import argparse
 from datetime import UTC, datetime, timedelta
 
 from timeexisting.content.phrases import pick
-from timeexisting.domain.clock import Clock, FixedClock, ScaledClock, SystemClock
-from timeexisting.ui.app import local_timezone, run
+from timeexisting.domain.clock import Clock, FixedClock, SystemClock
+from timeexisting.ui.app import local_timezone, run, run_demo
 
 _AT_FORMAT = "%Y-%m-%d %H:%M"
 
-# 1 real second = 24 simulated minutes: a full day cycles in 60 real
-# seconds, a full week in 7 real minutes.
-_DEMO_FACTOR = 1440.0
+# Fixed weekday-of-month used to build a demo month scenario; never lands
+# near a month boundary, so `day=15 + up to 2 days` never overflows.
+_DEMO_MONTH_DAY = 15
 
 
 def _to_utc(naive_local: datetime) -> datetime:
@@ -32,6 +32,42 @@ def _demo_start(reference: datetime) -> datetime:
     return monday.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
 
+def _weekday_noon(local_monday: datetime, month: int) -> datetime:
+    candidate = local_monday.replace(
+        month=month, day=_DEMO_MONTH_DAY, hour=12, minute=0, second=0, microsecond=0
+    )
+    if candidate.weekday() >= 5:
+        candidate += timedelta(days=7 - candidate.weekday())
+    return candidate
+
+
+def _demo_scenarios(reference: datetime) -> tuple[tuple[str, datetime], ...]:
+    """The fixed carousel: pre-work, morning work, lunch, afternoon work, the
+    last five minutes before the end, post-work, Saturday, Sunday, then one
+    weekday at noon for each of the twelve months. Every phase and every
+    month/season remark is reachable from this list.
+    """
+    monday = _demo_start(reference).astimezone(local_timezone())
+
+    def moment(days: int, hour: int, minute: int = 0) -> datetime:
+        return (monday + timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    scenarios = [
+        (pick("demo.scenario.pre_work"), moment(0, 8, 0)),
+        (pick("demo.scenario.morning_work"), moment(0, 10, 0)),
+        (pick("demo.scenario.lunch"), moment(0, 13, 30)),
+        (pick("demo.scenario.afternoon_work"), moment(0, 15, 0)),
+        (pick("demo.scenario.final_stretch"), moment(0, 17, 55)),
+        (pick("demo.scenario.post_work"), moment(0, 18, 30)),
+        (pick("demo.scenario.saturday"), moment(5, 12, 0)),
+        (pick("demo.scenario.sunday"), moment(6, 12, 0)),
+    ]
+    for month in range(1, 13):
+        scenarios.append((pick(f"demo.scenario.month.{month}"), _weekday_noon(monday, month)))
+
+    return tuple((label, when.astimezone(UTC)) for label, when in scenarios)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="te",
@@ -47,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--demo",
         action="store_true",
-        help="Cycle through a full day and week on a scaled clock.",
+        help="Cycle through a carousel of fixed states: every phase and every month.",
     )
     return parser
 
@@ -55,13 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _build_clock(args: argparse.Namespace) -> tuple[Clock, str]:
     if args.at is not None:
         return FixedClock(args.at), ""
-    if args.demo:
-        start = _demo_start(SystemClock().now())
-        return ScaledClock(start, _DEMO_FACTOR), pick("app.demo_label")
     return SystemClock(), ""
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.demo:
+        run_demo(_demo_scenarios(SystemClock().now()))
+        return
     clock, label = _build_clock(args)
     run(clock, label=label)

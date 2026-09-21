@@ -50,7 +50,7 @@ palette    = "grimdark"
 
 [profiles]
 default = "fun"
-hosts   = { "EXAMPLE-HOST" = "work" }
+hosts   = {}
 
 [power]
 action       = "sleep"          # none | notify | lock | sleep

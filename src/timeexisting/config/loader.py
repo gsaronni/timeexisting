@@ -45,12 +45,21 @@ def _load_overlay() -> dict:
     return _load_toml(lambda: path.open("rb"), source=str(path))
 
 
+# Tables whose keys are open-ended data, not a fixed schema: an overlay may
+# add any key here without tripping the unknown-key check. `profiles.hosts`
+# maps arbitrary hostnames (from `platform.node()`) to profile names.
+_OPEN_MAP_PATHS = frozenset({"profiles.hosts"})
+
+
 def _merge(defaults: dict, overlay: dict, prefix: str = "") -> dict:
     merged = dict(defaults)
     for key, value in overlay.items():
         key_path = f"{prefix}.{key}" if prefix else key
         if key not in defaults:
             raise ConfigError(f"unknown config key: {key_path}")
+        if key_path in _OPEN_MAP_PATHS:
+            merged[key] = value
+            continue
         default_value = defaults[key]
         if isinstance(default_value, dict) and isinstance(value, dict):
             merged[key] = _merge(default_value, value, key_path)

@@ -151,6 +151,8 @@ A =dayflag= event modifies how the day is built. Set with =f= on the dashboard o
 
 No target, no deduction, no accrual, no sleep. Presence is still recorded and appears in stats. The dashboard switches to the free-day panel set.
 
+Weekends and the day flags that replace the day (=sick=, =offsite=, =afspadsering=, =fri=) produce one segment spanning the whole day; the night-window =off_hours= bookends described under Credit clamps apply only to the working-day shape.
+
 
 * 5. Ledger and Storage
 

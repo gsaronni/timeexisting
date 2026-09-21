@@ -8,7 +8,9 @@ from timeexisting.config import loader
 from timeexisting.config.models import ConfigError, parse_clock_time, parse_duration
 
 
-def test_defaults_load():
+def test_defaults_load(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "does-not-exist.toml")
+
     config = loader.load_config()
 
     assert config.version == 1
@@ -20,7 +22,7 @@ def test_defaults_load():
     assert config.credit.default_start == time(9, 0)
     assert config.absence.meeting_slots == (timedelta(minutes=30), timedelta(hours=1))
     assert config.display.voice == "grimdark"
-    assert config.profiles.hosts == {"EXAMPLE-HOST": "work"}
+    assert config.profiles.hosts == {}
     assert config.power.action == "sleep"
     assert config.power.postpone_max == 1
     assert config.power.weekends is False
@@ -89,3 +91,17 @@ def test_missing_overlay_file_yields_pure_defaults(tmp_path, monkeypatch):
 
     assert config.display.voice == "grimdark"
     assert config.contract.weekly_target == timedelta(hours=37)
+
+
+def test_profiles_hosts_is_an_open_map_not_subject_to_unknown_key_checks(tmp_path, monkeypatch):
+    overlay = tmp_path / "config.toml"
+    overlay.write_text(
+        '[profiles.hosts]\n"EXAMPLE-HOST" = "work"\n"some-laptop" = "fun"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: overlay)
+
+    config = loader.load_config()
+
+    assert config.profiles.hosts == {"EXAMPLE-HOST": "work", "some-laptop": "fun"}
+    assert config.profiles.default == "fun"

@@ -1,19 +1,23 @@
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from timeexisting.config.loader import load_config
 from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.domain.segments import Phase, Segment
 
 _MONDAY = date(2026, 9, 14)
 _SATURDAY = date(2026, 9, 19)
 _SUNDAY = date(2026, 9, 20)
+# DST ends 25 October 2026 (always the last Sunday of October in the EU, so
+# it's never a working day); the Monday right after is the first weekday
+# in the new UTC+1 offset.
+_DAY_AFTER_DST_TRANSITION = date(2026, 10, 26)
 
 
 @pytest.fixture
-def cfg():
-    return load_config()
+def zone(cfg):
+    return ZoneInfo(cfg.display.timezone)
 
 
 @pytest.mark.parametrize(
@@ -49,16 +53,27 @@ def test_working_day_has_pre_work_lunch_and_post_work_in_order(cfg):
     ]
 
 
-def test_working_day_segments_are_contiguous_non_overlapping_and_span_the_day(cfg):
+def test_working_day_segments_are_contiguous_non_overlapping_and_span_the_day(cfg, zone):
     plan = build_day(_MONDAY, time(8, 30), frozenset(), cfg)
 
     for previous, current in zip(plan.segments, plan.segments[1:], strict=False):
         assert previous.end == current.start
 
-    # Domain segments are intentionally naive: a calendar day's wall-clock
-    # shape, not an aware instant. See domain/schedule.py's module docstring.
-    assert plan.segments[0].start == datetime(2026, 9, 14, 0, 0)  # noqa: DTZ001
-    assert plan.segments[-1].end == datetime(2026, 9, 15, 0, 0)  # noqa: DTZ001
+    assert plan.segments[0].start == datetime(2026, 9, 14, 0, 0, tzinfo=zone)
+    assert plan.segments[-1].end == datetime(2026, 9, 15, 0, 0, tzinfo=zone)
+
+
+def test_segments_are_aware_in_the_configured_timezone(cfg, zone):
+    plan = build_day(_MONDAY, time(8, 30), frozenset(), cfg)
+    for segment in plan.segments:
+        assert segment.start.tzinfo == zone
+        assert segment.end.tzinfo == zone
+
+
+def test_nominal_end_stays_wall_clock_correct_after_the_dst_transition(cfg):
+    plan = build_day(_DAY_AFTER_DST_TRANSITION, time(8, 30), frozenset(), cfg)
+    assert plan.nominal_end.time() == time(16, 24)
+    assert plan.nominal_end.utcoffset() == timedelta(hours=1)  # CET, not CEST
 
 
 def test_night_window_produces_off_hours_at_both_ends(cfg):
@@ -71,13 +86,13 @@ def test_night_window_produces_off_hours_at_both_ends(cfg):
 
 
 @pytest.mark.parametrize("day", [_SATURDAY, _SUNDAY])
-def test_weekend_is_a_single_off_day_segment(cfg, day):
+def test_weekend_is_a_single_off_day_segment(cfg, zone, day):
     plan = build_day(day, time(9, 0), frozenset(), cfg)
 
     assert plan.segments == (
         Segment(
-            start=datetime.combine(day, time()),
-            end=datetime.combine(day, time()) + timedelta(days=1),
+            start=datetime.combine(day, time(), tzinfo=zone),
+            end=datetime.combine(day, time(), tzinfo=zone) + timedelta(days=1),
             phase=Phase.OFF_DAY,
             label="weekend",
             paid=False,

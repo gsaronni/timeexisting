@@ -89,7 +89,7 @@ def _render_break(phase: Phase, now: datetime, theme: Theme) -> Panel:
     remaining_minutes = int(resolve_break_progress(now).remaining.total_seconds() // 60)
 
     content = Table.grid(padding=1)
-    content.add_row(Text(heading, style=f"bold {color}", justify="center"))
+    content.add_row(Text(heading, style=theme.bold(color), justify="center"))
     content.add_row(Text(message, style=theme.emphasis, justify="center"))
     if art:
         content.add_row(Text(art, style=theme.muted))
@@ -160,7 +160,7 @@ def _render_work(now: datetime, theme: Theme) -> Panel:
     content.add_row(
         Text(
             pick("work.progress").format(percentage=progress.percentage),
-            style=f"bold {progress_color}",
+            style=theme.bold(progress_color),
             justify="center",
         )
     )

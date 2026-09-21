@@ -55,6 +55,9 @@ class Theme:
             return self.progress_mid
         return self.progress_high
 
+    def bold(self, style: str) -> str:
+        return f"bold {style}"
+
 
 @cache
 def load_theme(name: str = DEFAULT_PALETTE) -> Theme:

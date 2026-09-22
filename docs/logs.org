@@ -16,7 +16,7 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 | Phase | Status | Tag | Notes |
 |---|---|---|---|
 | 0 | complete | =phase-0= | prompt at =docs/phase-0-prompt.md= |
-| 1 | complete | | prompt at =docs/phase-1-prompt.md=; tests green, not yet tagged |
+| 1 | complete | =phase-1= | prompt at =docs/phase-1-prompt.md= |
 | 2 | | | |
 | 3 | | | |
 | 4 | | | |
@@ -48,7 +48,7 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 *Observed:* several small gaps between the roadmap/prompt and reality, all fixed in place rather than worked around: the architecture test the prompt described didn't exist; the 08:00-09:00 flex band wasn't actually represented in the config schema despite the prompt asking to validate against it "from config"; =profiles.hosts= needed to become an open map, not a fixed-key table, for arbitrary hostnames; the demo's requested DST-transition test date (25 October 2026) is always a Sunday, so =build_day= takes the weekend branch there regardless of =start= — used the following Monday instead.
 
-*Carried over:* all eight steps are done and tests are green, but nothing has been tagged =phase-1= yet; that is for you once you are satisfied with the review. Phase 2 (ledger and storage) is next, per =docs/timeexisting-roadmap.org= section 16.
+*Carried over:* tagged =phase-1= (moved from the step 7 commit to the step 8 commit after a pre-commit trailing-whitespace fix to =.gitignore= blocked the first attempt). Phase 2 (ledger and storage) is next, per =docs/timeexisting-roadmap.org= section 16.
 
 ** 2026-09-18, phase 0: migration, defect fixes, content and theme plumbing
 

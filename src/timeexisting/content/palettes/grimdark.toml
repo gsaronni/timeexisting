@@ -41,7 +41,7 @@ afternoon = "cyan"
 
 [phase]
 pre_work  = "blue"
-work      = "cyan"
+working   = "cyan"
 post_work = "green"
 weekend   = "magenta"
 

@@ -6,11 +6,16 @@ boundary. The loop runs one cadence (defect 7): `refresh_hz` drives both the
 Live repaint rate and the content-update sleep. On Ctrl+C, `Live`'s context
 manager stops the display before the `except` block prints the exit line;
 nothing sleeps on the way out (defect 11).
+
+Each tick builds the day's `DayPlan` from the (already-localized) date and
+resolves it against the (already-localized) instant, so `Resolved.now` is
+directly usable by the panels without further conversion.
 """
 
 import time
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import time as day_time
 from functools import cache
 from zoneinfo import ZoneInfo
 
@@ -19,8 +24,11 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.text import Text
 
+from timeexisting.config.models import Config
 from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock
+from timeexisting.domain.resolver import Resolved, resolve
+from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ui.layout import build_layout
 from timeexisting.ui.panels import day, week, year
 from timeexisting.ui.theme import Theme, load_theme
@@ -37,13 +45,22 @@ def _localize(now_utc: datetime) -> datetime:
     return now_utc.astimezone(local_timezone())
 
 
-def _update(layout: Layout, now: datetime, theme: Theme) -> None:
-    layout["main"]["left"]["year"].update(year.render(now, theme))
-    layout["main"]["left"]["week"].update(week.render(now, theme))
-    layout["main"]["right"].update(day.render(now, theme))
+def _update(layout: Layout, resolved: Resolved, cfg: Config, theme: Theme) -> None:
+    layout["main"]["left"]["year"].update(year.render(resolved.now, theme))
+    layout["main"]["left"]["week"].update(week.render(resolved, cfg, theme))
+    layout["main"]["right"].update(day.render(resolved, theme))
 
 
-def run(clock: Clock, *, refresh_hz: float = 1.0, label: str = "", console: Console | None = None) -> None:
+def run(
+    clock: Clock,
+    cfg: Config,
+    start: day_time,
+    flags: frozenset[DayFlag],
+    *,
+    refresh_hz: float = 1.0,
+    label: str = "",
+    console: Console | None = None,
+) -> None:
     theme = load_theme()
     layout = build_layout(theme)
     console = console or Console()
@@ -59,23 +76,27 @@ def run(clock: Clock, *, refresh_hz: float = 1.0, label: str = "", console: Cons
     try:
         with Live(layout, console=console, refresh_per_second=refresh_hz, screen=True):
             while True:
-                _update(layout, _localize(clock.now()), theme)
+                now_local = _localize(clock.now())
+                plan = build_day(now_local.date(), start, flags, cfg)
+                resolved = resolve(now_local, plan)
+                _update(layout, resolved, cfg, theme)
                 time.sleep(interval)
     except KeyboardInterrupt:
         console.print(pick("app.interrupted"), style=theme.danger)
 
 
 def run_demo(
-    scenarios: Sequence[tuple[str, datetime]],
+    scenarios: Sequence[tuple[str, Resolved]],
+    cfg: Config,
     *,
     step_seconds: float = 4.0,
     refresh_hz: float = 1.0,
     console: Console | None = None,
 ) -> None:
-    """Cycle the panels through a fixed list of `(label, moment)` scenarios,
+    """Cycle the panels through a fixed list of `(label, resolved)` scenarios,
     each held for `step_seconds` before advancing, looping forever. Every
-    scenario is rendered through a fixed moment in time: this is a showcase
-    of states, not an accelerated clock.
+    scenario is a precomputed `Resolved` at a fixed moment: this is a
+    showcase of states, not an accelerated clock.
     """
     theme = load_theme()
     layout = build_layout(theme)
@@ -90,12 +111,11 @@ def run_demo(
     try:
         with Live(layout, console=console, refresh_per_second=refresh_hz, screen=True):
             while True:
-                for label, moment in scenarios:
+                for label, resolved in scenarios:
                     footer_text = f"{label} {demo_tag}" if demo_tag else label
                     layout["footer"].update(Text(footer_text, style=theme.muted, justify="center"))
-                    local_moment = _localize(moment)
                     for _ in range(ticks_per_step):
-                        _update(layout, local_moment, theme)
+                        _update(layout, resolved, cfg, theme)
                         time.sleep(interval)
     except KeyboardInterrupt:
         console.print(pick("app.interrupted"), style=theme.danger)

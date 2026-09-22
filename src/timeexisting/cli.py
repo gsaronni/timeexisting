@@ -10,7 +10,8 @@ from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock, FixedClock, SystemClock
-from timeexisting.domain.schedule import DayFlag
+from timeexisting.domain.resolver import Resolved, resolve
+from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ui.app import local_timezone, run, run_demo
 
 _AT_FORMAT = "%Y-%m-%d %H:%M"
@@ -72,31 +73,43 @@ def _weekday_noon(local_monday: datetime, month: int) -> datetime:
     return candidate
 
 
-def _demo_scenarios(reference: datetime) -> tuple[tuple[str, datetime], ...]:
+def _demo_scenarios(reference: datetime, cfg: Config) -> tuple[tuple[str, Resolved], ...]:
     """The fixed carousel: pre-work, morning work, lunch, afternoon work, the
     last five minutes before the end, post-work, Saturday, Sunday, then one
     weekday at noon for each of the twelve months. Every phase and every
     month/season remark is reachable from this list.
-    """
-    monday = _demo_start(reference).astimezone(local_timezone())
 
-    def moment(days: int, hour: int, minute: int = 0) -> datetime:
-        return (monday + timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    Each entry is a precomputed `Resolved`, built from its own `DayPlan` (an
+    unflagged day, `[credit].default_start`), so the carousel stays correct
+    against whatever schedule the config actually describes.
+    """
+    monday_dt = _demo_start(reference).astimezone(local_timezone())
+    monday = monday_dt.date()
+    start = cfg.credit.default_start
+    plan = build_day(monday, start, frozenset(), cfg)
+    lunch, afternoon = plan.segments[3], plan.segments[4]
 
     scenarios = [
-        (pick("demo.scenario.pre_work"), moment(0, 8, 0)),
-        (pick("demo.scenario.morning_work"), moment(0, 10, 0)),
-        (pick("demo.scenario.lunch"), moment(0, 13, 30)),
-        (pick("demo.scenario.afternoon_work"), moment(0, 15, 0)),
-        (pick("demo.scenario.final_stretch"), moment(0, 17, 55)),
-        (pick("demo.scenario.post_work"), moment(0, 18, 30)),
-        (pick("demo.scenario.saturday"), moment(5, 12, 0)),
-        (pick("demo.scenario.sunday"), moment(6, 12, 0)),
+        (pick("demo.scenario.pre_work"), resolve(plan.start - timedelta(minutes=30), plan)),
+        (pick("demo.scenario.morning_work"), resolve(plan.start + timedelta(hours=1, minutes=30), plan)),
+        (pick("demo.scenario.lunch"), resolve(lunch.start + (lunch.end - lunch.start) / 2, plan)),
+        (pick("demo.scenario.afternoon_work"), resolve(afternoon.start + timedelta(hours=1), plan)),
+        (pick("demo.scenario.final_stretch"), resolve(plan.nominal_end - timedelta(minutes=5), plan)),
+        (pick("demo.scenario.post_work"), resolve(plan.nominal_end + timedelta(minutes=30), plan)),
     ]
-    for month in range(1, 13):
-        scenarios.append((pick(f"demo.scenario.month.{month}"), _weekday_noon(monday, month)))
 
-    return tuple((label, when.astimezone(UTC)) for label, when in scenarios)
+    for offset, key in ((5, "saturday"), (6, "sunday")):
+        weekend_day = monday + timedelta(days=offset)
+        weekend_plan = build_day(weekend_day, start, frozenset(), cfg)
+        noon = datetime.combine(weekend_day, time(12, 0), tzinfo=local_timezone())
+        scenarios.append((pick(f"demo.scenario.{key}"), resolve(noon, weekend_plan)))
+
+    for month in range(1, 13):
+        moment = _weekday_noon(monday_dt, month)
+        month_plan = build_day(moment.date(), start, frozenset(), cfg)
+        scenarios.append((pick(f"demo.scenario.month.{month}"), resolve(moment, month_plan)))
+
+    return tuple(scenarios)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,11 +216,7 @@ def _config_init() -> None:
 
 
 def _config_check() -> None:
-    try:
-        loader.load_config()
-    except ConfigError as error:
-        print(str(error), file=sys.stderr)
-        raise SystemExit(2) from error
+    _load_config_or_exit()
     print(f"ok {paths.config_file()}")
 
 
@@ -220,13 +229,27 @@ def _run_config_command(command: str) -> None:
         _config_check()
 
 
+def _load_config_or_exit() -> Config:
+    try:
+        return loader.load_config()
+    except ConfigError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(2) from error
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "config":
         _run_config_command(args.config_command)
         return
+
+    cfg = _load_config_or_exit()
+
     if args.demo:
-        run_demo(_demo_scenarios(SystemClock().now()))
+        run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
         return
+
+    start = _resolve_start(args, cfg, _viewer_day(args))
+    flags = frozenset(args.flags)
     clock, label = _build_clock(args)
-    run(clock, label=label)
+    run(clock, cfg, start, flags, label=label)

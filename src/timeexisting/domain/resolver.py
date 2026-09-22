@@ -1,10 +1,12 @@
 """Resolves the active segment and progress through a built day.
 
-Pure: `(now, plan) -> Resolved`. No clock, no I/O, no rich. `now` is the
-clock's aware UTC instant; `plan.segments` are aware local datetimes (see
-`domain/schedule.py`'s module docstring) -- comparing or subtracting one
-from the other is an ordinary aware-to-aware operation, correct regardless
-of either side's UTC offset.
+Pure: `(now, plan) -> Resolved`. No clock, no I/O, no rich. `plan.segments`
+are aware local datetimes (see `domain/schedule.py`'s module docstring);
+`now` need only be aware too -- comparing or subtracting one from the other
+is an ordinary aware-to-aware operation, correct regardless of either side's
+UTC offset. `Resolved` carries `now` and `plan` alongside the derived
+values, so `ui/panels/day.py` and `ui/panels/week.py` can render from it
+alone.
 """
 
 from dataclasses import dataclass
@@ -16,6 +18,8 @@ from timeexisting.domain.segments import Segment
 
 @dataclass(frozen=True, slots=True)
 class Resolved:
+    now: datetime
+    plan: DayPlan
     segment: Segment
     elapsed: timedelta
     remaining: timedelta
@@ -58,6 +62,8 @@ def resolve(now: datetime, plan: DayPlan) -> Resolved:
         progress = max(0.0, min(1.0, expected_credit / plan.target))
 
     return Resolved(
+        now=now,
+        plan=plan,
         segment=segment,
         elapsed=elapsed,
         remaining=remaining,

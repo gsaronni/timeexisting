@@ -5,6 +5,7 @@ import pytest
 from timeexisting import cli, paths
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.schedule import DayFlag
+from timeexisting.domain.segments import Phase
 
 
 def test_no_arguments_yields_a_system_clock():
@@ -43,10 +44,10 @@ def test_demo_start_is_monday_of_the_reference_week():
     assert local_start.date() < reference.astimezone(cli.local_timezone()).date()
 
 
-def test_demo_scenarios_cover_every_weekday_phase_and_weekend_day():
+def test_demo_scenarios_cover_every_weekday_phase_and_weekend_day(cfg):
     reference = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)  # a Thursday
-    scenarios = cli._demo_scenarios(reference)
-    labels = [label for label, _moment in scenarios]
+    scenarios = cli._demo_scenarios(reference, cfg)
+    labels = [label for label, _resolved in scenarios]
 
     assert labels[:8] == [
         "Pre-Work",
@@ -58,25 +59,36 @@ def test_demo_scenarios_cover_every_weekday_phase_and_weekend_day():
         "Saturday",
         "Sunday",
     ]
-    saturday_moment = scenarios[6][1].astimezone(cli.local_timezone())
-    sunday_moment = scenarios[7][1].astimezone(cli.local_timezone())
-    assert saturday_moment.weekday() == 5
-    assert sunday_moment.weekday() == 6
+
+    expected_phases = [
+        Phase.PRE_WORK,
+        Phase.WORKING,
+        Phase.LUNCH,
+        Phase.WORKING,
+        Phase.WORKING,  # final stretch: still working, five minutes before nominal_end
+        Phase.POST_WORK,
+        Phase.OFF_DAY,
+        Phase.OFF_DAY,
+    ]
+    for (_label, resolved), expected_phase in zip(scenarios[:8], expected_phases, strict=True):
+        assert resolved.segment.phase is expected_phase
+
+    assert scenarios[6][1].now.weekday() == 5  # Saturday
+    assert scenarios[7][1].now.weekday() == 6  # Sunday
 
 
-def test_demo_scenarios_cover_every_month_on_a_weekday_at_noon():
+def test_demo_scenarios_cover_every_month_on_a_weekday_at_noon(cfg):
     reference = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)  # a Thursday
-    scenarios = cli._demo_scenarios(reference)
+    scenarios = cli._demo_scenarios(reference, cfg)
     month_scenarios = scenarios[8:]
 
     assert len(month_scenarios) == 12
     months_seen = set()
-    for label, moment in month_scenarios:
-        local_moment = moment.astimezone(cli.local_timezone())
-        assert local_moment.weekday() < 5
-        assert local_moment.hour == 12
+    for label, resolved in month_scenarios:
+        assert resolved.now.weekday() < 5
+        assert resolved.now.hour == 12
         assert label != ""
-        months_seen.add(local_moment.month)
+        months_seen.add(resolved.now.month)
     assert months_seen == set(range(1, 13))
 
 

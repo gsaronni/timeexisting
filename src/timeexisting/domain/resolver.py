@@ -23,6 +23,7 @@ class Resolved:
     segment: Segment
     elapsed: timedelta
     remaining: timedelta
+    remaining_to_end: timedelta
     next_segment: Segment | None
     expected_credit: timedelta
     progress: float
@@ -54,6 +55,7 @@ def resolve(now: datetime, plan: DayPlan) -> Resolved:
 
     elapsed = max(timedelta(0), min(now, segment.end) - segment.start)
     remaining = max(timedelta(0), segment.end - max(now, segment.start))
+    remaining_to_end = max(timedelta(0), plan.nominal_end - now)
 
     expected_credit = sum((_paid_elapsed(now, s) for s in plan.segments), timedelta(0))
 
@@ -67,6 +69,7 @@ def resolve(now: datetime, plan: DayPlan) -> Resolved:
         segment=segment,
         elapsed=elapsed,
         remaining=remaining,
+        remaining_to_end=remaining_to_end,
         next_segment=next_segment,
         expected_credit=expected_credit,
         progress=progress,

@@ -8,8 +8,6 @@ arithmetic and produce negative durations) with a `match` on the resolved
 `Phase`, so each branch is reachable only when the phase actually says so.
 """
 
-from datetime import timedelta
-
 from rich.bar import Bar
 from rich.panel import Panel
 from rich.table import Table
@@ -164,11 +162,12 @@ def _render_lunch(resolved: Resolved, theme: Theme) -> Panel:
 
 def _render_working(resolved: Resolved, theme: Theme) -> Panel:
     plan = resolved.plan
-    remaining_to_end = max(timedelta(0), plan.nominal_end - resolved.now)
-    hours, rest = divmod(int(remaining_to_end.total_seconds()), 3600)
+    hours, rest = divmod(int(resolved.remaining_to_end.total_seconds()), 3600)
     minutes, seconds = divmod(rest, 60)
 
-    percentage = round(resolved.progress * 100)
+    # Floored, not rounded: 100% appears only once `progress` actually
+    # reaches 1.0 at `nominal_end`, not a minute early.
+    percentage = int(resolved.progress * 100)
     progress_color = theme.progress_color(percentage)
     anim = _ANIMATION_FRAMES[resolved.now.second % len(_ANIMATION_FRAMES)]
     message_bucket = min(percentage // 10, 9)

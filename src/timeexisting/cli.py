@@ -2,7 +2,7 @@
 
 import argparse
 import sys
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from importlib.resources import files
 
 from timeexisting import paths
@@ -79,6 +79,10 @@ def _demo_scenarios(reference: datetime, cfg: Config) -> tuple[tuple[str, Resolv
     weekday at noon for each of the twelve months. Every phase and every
     month/season remark is reachable from this list.
 
+    Also covers `OFF_HOURS` (not part of the step 1 list, but needed so the
+    carousel genuinely contains every phase, per step 8), a moment in the
+    small hours before `PRE_WORK` begins.
+
     Each entry is a precomputed `Resolved`, built from its own `DayPlan` (an
     unflagged day, `[credit].default_start`), so the carousel stays correct
     against whatever schedule the config actually describes.
@@ -87,9 +91,10 @@ def _demo_scenarios(reference: datetime, cfg: Config) -> tuple[tuple[str, Resolv
     monday = monday_dt.date()
     start = cfg.credit.default_start
     plan = build_day(monday, start, frozenset(), cfg)
-    lunch, afternoon = plan.segments[3], plan.segments[4]
+    off_hours, lunch, afternoon = plan.segments[0], plan.segments[3], plan.segments[4]
 
     scenarios = [
+        (pick("demo.scenario.off_hours"), resolve(off_hours.start + timedelta(hours=2), plan)),
         (pick("demo.scenario.pre_work"), resolve(plan.start - timedelta(minutes=30), plan)),
         (pick("demo.scenario.morning_work"), resolve(plan.start + timedelta(hours=1, minutes=30), plan)),
         (pick("demo.scenario.lunch"), resolve(lunch.start + (lunch.end - lunch.start) / 2, plan)),
@@ -161,10 +166,18 @@ def _build_clock(args: argparse.Namespace) -> tuple[Clock, str]:
     return SystemClock(), ""
 
 
-def _viewer_day(args: argparse.Namespace) -> date:
+def _viewer_now(args: argparse.Namespace) -> datetime:
     if args.at is not None:
-        return args.at.astimezone(local_timezone()).date()
-    return SystemClock().now().astimezone(local_timezone()).date()
+        return args.at.astimezone(local_timezone())
+    return SystemClock().now().astimezone(local_timezone())
+
+
+def _in_night_window(moment: time, cfg: Config) -> bool:
+    night_start = cfg.credit.night_start
+    night_end = cfg.credit.night_end
+    if night_start <= night_end:
+        return night_start <= moment < night_end
+    return moment >= night_start or moment < night_end  # wraps midnight, e.g. 22:00-06:00
 
 
 def _prompt_start(cfg: Config, *, read=input, write=print) -> time:
@@ -189,10 +202,13 @@ def _warn_outside_flex_band(
         )
 
 
-def _resolve_start(args: argparse.Namespace, cfg: Config, day: date, *, read=input, write=print) -> time:
+def _resolve_start(args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print) -> time:
     if args.start is not None:
         start = args.start
-    elif day.weekday() >= 5:
+    elif now.date().weekday() >= 5:
+        start = cfg.credit.default_start
+    elif _in_night_window(now.time(), cfg) or now.time() > cfg.credit.latest:
+        # Nothing reasonable to ask at this hour: use the default silently.
         start = cfg.credit.default_start
     else:
         start = _prompt_start(cfg, read=read, write=write)
@@ -249,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
         run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
         return
 
-    start = _resolve_start(args, cfg, _viewer_day(args))
+    start = _resolve_start(args, cfg, _viewer_now(args))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
     run(clock, cfg, start, flags, label=label)

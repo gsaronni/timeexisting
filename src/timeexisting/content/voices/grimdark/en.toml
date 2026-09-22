@@ -115,7 +115,7 @@ next_segment = ["Next: {label} at {time}"]
 panel_title = ["LUNCH BREAK"]
 heading = ["🍽️ LUNCH BREAK"]
 label = ["Lunch"]
-message = ["One hour to consume sustenance and pretend you have a life outside these walls..."]
+message = ["Thirty minutes to consume sustenance and pretend you have a life outside these walls..."]
 time_remaining = ["Time remaining: {minutes} minutes"]
 
 [weekend_activity.gaming]
@@ -143,6 +143,7 @@ message = ["🤺 Lunging at another person with a sword, the only socially sanct
 message = ["♟️ Sacrificing pieces you pretended to value, a Tuesday-evening rehearsal for Monday..."]
 
 [demo.scenario]
+off_hours = ["Off Hours"]
 pre_work = ["Pre-Work"]
 morning_work = ["Morning Work"]
 lunch = ["Lunch"]

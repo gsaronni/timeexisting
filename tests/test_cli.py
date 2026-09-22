@@ -5,7 +5,6 @@ import pytest
 from timeexisting import cli, paths
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.schedule import DayFlag
-from timeexisting.domain.segments import Phase
 
 
 def test_no_arguments_yields_a_system_clock():
@@ -34,62 +33,6 @@ def test_at_rejects_a_malformed_value():
 def test_at_and_demo_are_mutually_exclusive():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["--at", "2026-09-17 07:30", "--demo"])
-
-
-def test_demo_start_is_monday_of_the_reference_week():
-    reference = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)  # a Thursday
-    start = cli._demo_start(reference)
-    local_start = start.astimezone(cli.local_timezone())
-    assert local_start.weekday() == 0
-    assert local_start.date() < reference.astimezone(cli.local_timezone()).date()
-
-
-def test_demo_scenarios_cover_every_weekday_phase_and_weekend_day(cfg):
-    reference = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)  # a Thursday
-    scenarios = cli._demo_scenarios(reference, cfg)
-    labels = [label for label, _resolved in scenarios]
-
-    assert labels[:8] == [
-        "Pre-Work",
-        "Morning Work",
-        "Lunch",
-        "Afternoon Work",
-        "Final Stretch",
-        "Post-Work",
-        "Saturday",
-        "Sunday",
-    ]
-
-    expected_phases = [
-        Phase.PRE_WORK,
-        Phase.WORKING,
-        Phase.LUNCH,
-        Phase.WORKING,
-        Phase.WORKING,  # final stretch: still working, five minutes before nominal_end
-        Phase.POST_WORK,
-        Phase.OFF_DAY,
-        Phase.OFF_DAY,
-    ]
-    for (_label, resolved), expected_phase in zip(scenarios[:8], expected_phases, strict=True):
-        assert resolved.segment.phase is expected_phase
-
-    assert scenarios[6][1].now.weekday() == 5  # Saturday
-    assert scenarios[7][1].now.weekday() == 6  # Sunday
-
-
-def test_demo_scenarios_cover_every_month_on_a_weekday_at_noon(cfg):
-    reference = datetime(2026, 9, 17, 15, 0, tzinfo=UTC)  # a Thursday
-    scenarios = cli._demo_scenarios(reference, cfg)
-    month_scenarios = scenarios[8:]
-
-    assert len(month_scenarios) == 12
-    months_seen = set()
-    for label, resolved in month_scenarios:
-        assert resolved.now.weekday() < 5
-        assert resolved.now.hour == 12
-        assert label != ""
-        months_seen.add(resolved.now.month)
-    assert months_seen == set(range(1, 13))
 
 
 def test_demo_flag_parses_and_is_dispatched_outside_build_clock():
@@ -188,9 +131,11 @@ def test_flags_default_to_an_empty_list():
     assert args.flags == []
 
 
-def test_viewer_day_uses_at_when_given():
+def test_viewer_now_uses_at_when_given():
     args = cli.build_parser().parse_args(["--at", "2026-09-19 10:00"])  # a Saturday
-    assert cli._viewer_day(args) == date(2026, 9, 19)
+    now = cli._viewer_now(args)
+    assert now.date() == date(2026, 9, 19)
+    assert (now.hour, now.minute) == (10, 0)
 
 
 def test_prompt_start_returns_the_config_default_on_empty_input(cfg):
@@ -225,19 +170,51 @@ def _unexpected_read(_prompt):
     raise AssertionError("should not prompt")
 
 
+def _at(hour: int, minute: int = 0, day: int = 14) -> datetime:
+    # 2026-09-14 is a Monday; +5/+6 days are the weekend.
+    return datetime(2026, 9, day, hour, minute, tzinfo=cli.local_timezone())
+
+
 def test_resolve_start_uses_cli_start_without_prompting(cfg):
     args = cli.build_parser().parse_args(["--start", "08:30"])
-    start = cli._resolve_start(args, cfg, date(2026, 9, 14), read=_unexpected_read)
+    start = cli._resolve_start(args, cfg, _at(10, 0), read=_unexpected_read)
     assert start == time(8, 30)
 
 
 def test_resolve_start_skips_the_prompt_on_a_weekend(cfg):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, date(2026, 9, 19), read=_unexpected_read)  # Saturday
+    start = cli._resolve_start(args, cfg, _at(10, 0, day=19), read=_unexpected_read)  # Saturday
     assert start == cfg.credit.default_start
 
 
 def test_resolve_start_prompts_on_an_unflagged_weekday(cfg):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, date(2026, 9, 14), read=lambda _p: "08:00", write=lambda _t: None)
+    start = cli._resolve_start(args, cfg, _at(10, 0), read=lambda _p: "08:00", write=lambda _t: None)
+    assert start == time(8, 0)
+
+
+def test_resolve_start_skips_the_prompt_in_the_night_window(cfg):
+    args = cli.build_parser().parse_args([])
+    assert cli._in_night_window(time(23, 0), cfg) is True
+    assert cli._in_night_window(time(2, 0), cfg) is True
+    assert cli._in_night_window(time(10, 0), cfg) is False
+
+    start = cli._resolve_start(args, cfg, _at(23, 0), read=_unexpected_read)
+    assert start == cfg.credit.default_start
+
+    start = cli._resolve_start(args, cfg, _at(2, 0), read=_unexpected_read)
+    assert start == cfg.credit.default_start
+
+
+def test_resolve_start_skips_the_prompt_after_latest_credit(cfg):
+    args = cli.build_parser().parse_args([])
+    assert cfg.credit.latest == time(19, 0)
+
+    start = cli._resolve_start(args, cfg, _at(20, 0), read=_unexpected_read)
+    assert start == cfg.credit.default_start
+
+
+def test_resolve_start_prompts_right_up_to_latest_credit(cfg):
+    args = cli.build_parser().parse_args([])
+    start = cli._resolve_start(args, cfg, _at(18, 59), read=lambda _p: "08:00", write=lambda _t: None)
     assert start == time(8, 0)

@@ -16,7 +16,7 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 | Phase | Status | Tag | Notes |
 |---|---|---|---|
 | 0 | complete | =phase-0= | prompt at =docs/phase-0-prompt.md= |
-| 1 | not started | | prompt at =docs/phase-1-prompt.md= |
+| 1 | complete | | prompt at =docs/phase-1-prompt.md=; tests green, not yet tagged |
 | 2 | | | |
 | 3 | | | |
 | 4 | | | |
@@ -27,6 +27,28 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 | 9 | | | |
 
 * Entries
+
+** 2026-09-22, phase 1: schedule model, configuration, resolver, panels
+
+*Asked:* execute =docs/phase-1-prompt.md= one step at a time, stopping for review after each: replace the legacy 09:00-18:00 schedule with the real section 4 model, add configuration loading, add day flags, fix the demo so it is a carousel of states, then rewire the panels onto the new schedule and resolver.
+
+*Done:*
+- Step 1: =te --demo= replaced with a fixed carousel of =(label, moment)= scenarios through =FixedClock=, stepping every 4s.
+- Step 2: =tests/test_architecture.py= (did not exist yet, despite the prompt's premise that it did) written fresh with =ast= instead of grep; caught and fixed two real violations along the way (hardcoded ="bold "= style strings in =day.py=, via a new =Theme.bold()= helper).
+- Step 3: =config/models.py=, =config/loader.py=, =config/defaults.toml=, =paths.py=; =te config path/init/check= subcommands. Found and fixed two gaps between the roadmap and reality: on Windows, =platformdirs= collapses config and state into the same folder without =appauthor=False, roaming=True=; and TOML local-time literals require seconds (=11:00:00=, not =11:00=), which the roadmap's own section 15 examples got wrong (fixed there too).
+- Step 4: =domain/segments.py= (=Phase=, =Segment=) and =domain/schedule.py= (=DayFlag=, =build_day=). Judgment call, since the prompt's wording conflicted with itself: weekends and the four off-day flags produce a single segment with no night-window bookends; documented explicitly in roadmap section 4. Deleting =domain/phases.py= deferred to step 7 (still referenced by the unmigrated =day.py=).
+- Step 5: =domain/resolver.py= (=Resolved=, =resolve=). Segments became aware local datetimes (=ZoneInfo(cfg.display.timezone)=, wall-clock arithmetic, verified stable across the 25 October 2026 DST transition) rather than naive, so =resolve()= compares the clock's aware =now= directly with no pre-localization.
+- Step 6: =--start=, =--flag=, the interactive prompt, and flex-band validation, all in =cli.py= only, fully tested but deliberately not wired into =main()='s viewer path yet (nothing downstream could consume the values without pulling step 7 forward).
+- Step 7: wired =cli.py=/=ui/app.py=/=ui/panels/day.py=/=ui/panels/week.py= together onto =Resolved=; the working panel gained a real =rich.bar.Bar=. Rebuilt the demo carousel's scenario moments, since the original 13:30/17:55 guesses no longer land in the right phase under the new schedule. Deleted =domain/phases.py= and its test, finally unreferenced.
+- Four follow-up fixes: moved =nominal_end - now= out of =day.py= into =Resolved.remaining_to_end=; floored (not rounded) the working-panel percentage so 100% lands exactly at =nominal_end=, not a minute early; fixed the lunch pack message (still said "one hour", lunch is 30m); the start-time prompt now also skips silently (using =default_start=) inside the night window or after =latest_credit=, not only on weekends.
+- Step 8: audited the four named test files. =test_schedule.py=, =test_resolver.py=, =test_config.py= already covered everything asked, having been built incrementally with their own steps. =test_demo.py= did not exist; writing it surfaced that the carousel never actually visited =OFF_HOURS=, so an off-hours scenario was added before the "every phase" test could honestly pass.
+- =ruff check .=, =ruff format --check .= and =pytest= green throughout; 169 tests at the end.
+
+*Rejected:* nothing pulled forward; stayed inside each step's own scope and stopped for review after every one, including when doing so left newly-added CLI surface temporarily unused.
+
+*Observed:* several small gaps between the roadmap/prompt and reality, all fixed in place rather than worked around: the architecture test the prompt described didn't exist; the 08:00-09:00 flex band wasn't actually represented in the config schema despite the prompt asking to validate against it "from config"; =profiles.hosts= needed to become an open map, not a fixed-key table, for arbitrary hostnames; the demo's requested DST-transition test date (25 October 2026) is always a Sunday, so =build_day= takes the weekend branch there regardless of =start= — used the following Monday instead.
+
+*Carried over:* all eight steps are done and tests are green, but nothing has been tagged =phase-1= yet; that is for you once you are satisfied with the review. Phase 2 (ledger and storage) is next, per =docs/timeexisting-roadmap.org= section 16.
 
 ** 2026-09-18, phase 0: migration, defect fixes, content and theme plumbing
 

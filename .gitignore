@@ -11,12 +11,11 @@ build/
 .coverage
 htmlcov/
 
-# Never commit the ledger, the state directory or a local config copy.
-# These contain a minute-by-minute record of presence at a machine.
+# Runtime data lives in platformdirs, never in the repo. These are a safety net.
+/state/
+/ledger/
+/logs/
 *.jsonl
-*.lock
-state/
-ledger/
-logs/
+!tests/fixtures/**/*.jsonl
 config.local.toml
 calendar.local.toml

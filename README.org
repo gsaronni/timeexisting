@@ -21,6 +21,19 @@ pre-commit install
 te --help
 #+end_src
 
+* Multiple machines
+
+The repository carries the program, not your data. Config lives in =%APPDATA%\timeexisting\= (=~/.config/timeexisting/= on Linux) and the ledger, lockfiles and diagnostic log in =%LOCALAPPDATA%\timeexisting\= (=~/.local/state/timeexisting/=), per machine.
+
+To share one config and one ledger across devices, point these at a folder you sync yourself:
+
+| Variable | Overrides |
+|---|---|
+| =TIMEEXISTING_CONFIG_DIR= | the config directory, holding =config.toml= |
+| =TIMEEXISTING_STATE_DIR= | the state directory, holding =ledger\=, =logs\= and the lockfiles |
+
+The ledger is sharded one file per host, so machines writing at the same time never touch the same file.
+
 * Specification
 
 See =docs/timeexisting-roadmap.org=. That file is the contract, this one is the front door.

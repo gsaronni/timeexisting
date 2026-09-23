@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 38, 17 September 2026.
+*Last revised:* week 39, 23 September 2026.
 
 
 * 1. Purpose and Scope
@@ -78,7 +78,8 @@ The dashboard is not open all day. The collector must survive the terminal closi
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile, attach. Stale lock, reclaim and spawn.
 - =q= quits the viewer and leaves the collector. =Q= stops both.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
-- A console control handler (=SetConsoleCtrlHandler=) catches =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT= and writes =collector_stop= with an fsync before the process dies.
+- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. It creates a hidden message-only window (=HWND_MESSAGE= parent) on a daemon thread that answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, then releases the lock, before the process dies.
+- When =te collect= runs in a terminal, a console control handler (=SetConsoleCtrlHandler=) is registered as well, for =CTRL_CLOSE_EVENT=, =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT=. Both paths call one idempotent shutdown function, since logoff can deliver both.
 - The collector runs across midnight without restarting. Day state is derived per tick from the current date, never captured at startup.
 
 ** Subcommands
@@ -158,15 +159,15 @@ Weekends and the day flags that replace the day (=sick=, =offsite=, =afspadserin
 
 ** Locations
 
-Resolved through =platformdirs=. Never the repository, never a cloud-synced path by default.
+Resolved through =platformdirs=. Never the repository, never a cloud-synced path by default. =TIMEEXISTING_CONFIG_DIR= and =TIMEEXISTING_STATE_DIR= override the two roots when set, for a user who syncs one config and one ledger across machines by their own means. Directories are created on first use, never at import.
 
 | Artifact | Windows | Linux |
 |---|---|---|
 | Config | =%APPDATA%\timeexisting\= | =~/.config/timeexisting/= |
 | Ledger and state | =%LOCALAPPDATA%\timeexisting\= | =~/.local/state/timeexisting/= |
-| Diagnostic log | =...\logs\tracker.log= | =.../logs/tracker.log= |
+| Diagnostic log | =...\logs\{role}.log= | =.../logs/{role}.log= |
 
-The diagnostic log is a =RotatingFileHandler=, never stdout. The ledger is never rotated or truncated and is a different file.
+The diagnostic log is one =RotatingFileHandler= per role, =collector.log= and =viewer.log=, each 1 MB with 3 backups, never stdout or stderr. One file per role because the collector and the viewer run at the same time, and Windows cannot rename a file another process holds open: a shared file would fail every rollover and drop records until the other process closed it. A failed emit drops the record silently (=logging.raiseExceptions = False=) rather than printing to a terminal a =Live= display owns. The ledger is never rotated or truncated and is a different file.
 
 ** Sharding
 
@@ -177,12 +178,13 @@ One file per host: =ledger/{hostname}.jsonl=, hostname from =platform.node()=. R
 One JSON object per line, UTF-8, =\n= terminated.
 
 #+begin_src json
-{"v": 1, "ts": "2026-09-17T06:07:31+00:00", "host": "EXAMPLE-HOST", "profile": "work", "event": "unlock", "source": "win32", "confidence": "observed"}
+{"v": 1, "id": "01a0adfa34b87b2c9e41d5a6f0b3c872", "ts": "2026-09-17T06:07:31+00:00", "host": "EXAMPLE-HOST", "profile": "work", "event": "unlock", "source": "win32", "confidence": "observed"}
 #+end_src
 
 | Field | Notes |
 |---|---|
 | =v= | Schema version. Breaking changes bump it and ship a migration in =te edit migrate=. |
+| =id= | =uuid.uuid7()= as a 32-character lowercase hex string. Time-ordered, unique across hosts. The editor supersedes events by this id. |
 | =ts= | Aware UTC, ISO 8601. |
 | =host= | Shard name. |
 | =profile= | =work=, =fun=, =homelab=. Only =work= feeds the 37h accounting. Mapped from hostname in config. |

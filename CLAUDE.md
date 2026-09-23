@@ -17,4 +17,4 @@ Work only inside the phase you were asked for. Do not pull features forward.
 - Filenames under `assets/ascii_art/` are canonical. Code adapts to them.
 - Python 3.14: lazy annotations are default, so no `from __future__ import annotations`.
 - Full replacement files, not fragments. One concrete step at a time, then stop for review.
-- `ruff check .` and `pytest` pass before every commit.
+- `ruff format .`, `ruff check .` and `pytest` pass before every commit and before stopping for review.

@@ -1,11 +1,12 @@
 """The argparse surface. Parses arguments and dispatches; no logic lives here."""
 
 import argparse
+import logging
 import sys
 from datetime import UTC, datetime, time, timedelta
 from importlib.resources import files
 
-from timeexisting import paths
+from timeexisting import logging_setup, paths
 from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
@@ -13,6 +14,8 @@ from timeexisting.domain.clock import Clock, FixedClock, SystemClock
 from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ui.app import local_timezone, run, run_demo
+
+logger = logging.getLogger(__name__)
 
 _AT_FORMAT = "%Y-%m-%d %H:%M"
 _START_FORMAT = "%H:%M"
@@ -249,12 +252,15 @@ def _load_config_or_exit() -> Config:
     try:
         return loader.load_config()
     except ConfigError as error:
+        logger.error("config rejected: %s", error)
         print(str(error), file=sys.stderr)
         raise SystemExit(2) from error
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    logging_setup.configure("viewer")
+    logger.info("viewer started: %s", sys.argv[1:] if argv is None else argv)
     if args.command == "config":
         _run_config_command(args.config_command)
         return

@@ -113,6 +113,22 @@ def test_empty_data_is_omitted():
     assert "data" not in json.loads(to_json(_event()))
 
 
+def test_empty_data_round_trips():
+    # The writer omits an empty `data`; the reader must treat the key as optional, or the two disagree.
+    event = _event()
+    line = to_json(event)
+    assert "data" not in json.loads(line)
+    restored = from_json(line)
+    assert restored == event
+    assert restored.data == {}
+
+
+def test_explicit_empty_data_is_accepted():
+    event = from_json(json.dumps(_record(data={})))
+    assert event.data == {}
+    assert "data" not in json.loads(to_json(event))
+
+
 def test_one_line_no_trailing_newline():
     line = to_json(_event(data={"note": "two\nlines"}))
     assert "\n" not in line

@@ -21,6 +21,8 @@ _THEME_MODULE = _SRC_ROOT / "ui" / "theme.py"
 
 _ALL_MODULES = sorted(_SRC_ROOT.rglob("*.py"))
 _DOMAIN_MODULES = sorted((_SRC_ROOT / "domain").rglob("*.py"))
+# Modules held to the domain rules: no Rich, no clock, no I/O.
+_PURE_MODULES = [*_DOMAIN_MODULES, _SRC_ROOT / "ledger" / "events.py", _SRC_ROOT / "ledger" / "replay.py"]
 _MODULES_EXCEPT_CLOCK = [path for path in _ALL_MODULES if path != _CLOCK_MODULE]
 _MODULES_EXCEPT_THEME = [path for path in _ALL_MODULES if path != _THEME_MODULE]
 
@@ -32,6 +34,10 @@ _FORBIDDEN_CLOCK_CALLS = {
     "datetime.date.today",
     "time.time",
 }
+
+_IO_MODULES = {"io", "os", "pathlib", "shutil", "socket", "subprocess", "sys", "tempfile", "time", "logging"}
+_IO_PROJECT_MODULES = {"timeexisting.paths", "timeexisting.ledger.store", "timeexisting.logging_setup"}
+_IO_BUILTINS = {"open", "print", "input"}
 
 # Rich's own vocabulary, not a guess: every standard/extended colour name it
 # recognises, plus the canonical (non-abbreviated) style modifier keywords.
@@ -115,8 +121,8 @@ def _looks_like_rich_style(value: str) -> bool:
     return bool(words) and all(_is_style_word(word) for word in words)
 
 
-@pytest.mark.parametrize("path", _DOMAIN_MODULES, ids=_module_id)
-def test_domain_never_imports_rich(path: Path) -> None:
+@pytest.mark.parametrize("path", _PURE_MODULES, ids=_module_id)
+def test_pure_modules_never_import_rich(path: Path) -> None:
     tree = _parse(path)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -126,7 +132,26 @@ def test_domain_never_imports_rich(path: Path) -> None:
         else:
             continue
         offenders = [name for name in names if name == "rich" or name.startswith("rich.")]
-        assert not offenders, f"{path}:{node.lineno} domain/ imports {offenders}"
+        assert not offenders, f"{path}:{node.lineno} pure module imports {offenders}"
+
+
+@pytest.mark.parametrize("path", _PURE_MODULES, ids=_module_id)
+def test_pure_modules_do_no_io(path: Path) -> None:
+    tree = _parse(path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id not in _IO_BUILTINS, f"{path}:{node.lineno} calls {node.func.id}()"
+            continue
+        else:
+            continue
+        offenders = [
+            name for name in names if name.split(".")[0] in _IO_MODULES or name in _IO_PROJECT_MODULES
+        ]
+        assert not offenders, f"{path}:{node.lineno} pure module imports {offenders}"
 
 
 @pytest.mark.parametrize("path", _MODULES_EXCEPT_CLOCK, ids=_module_id)

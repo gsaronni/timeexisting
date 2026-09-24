@@ -35,8 +35,8 @@ green_max = "30m"
 amber_max = "50m"
 
 [collector]
-heartbeat = "30s"
-poll      = "30s"
+tick = "30s"
+poll = "30s"
 
 [notify]
 kitchen_start  = 13:30:00

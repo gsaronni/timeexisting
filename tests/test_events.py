@@ -38,7 +38,6 @@ def test_enums_carry_every_value_from_the_spec():
     assert {member.value for member in EventType} == {
         "collector_start",
         "collector_stop",
-        "heartbeat",
         "lock",
         "unlock",
         "suspend",
@@ -54,11 +53,19 @@ def test_enums_carry_every_value_from_the_spec():
         "win32",
         "eventlog",
         "dbus",
-        "heartbeat",
+        "collector",
         "manual",
         "backfill",
     }
     assert {member.value for member in Confidence} == {"observed", "inferred"}
+
+
+@pytest.mark.parametrize("key", ["event", "source"])
+def test_heartbeat_is_retired_and_rejected_on_read(key):
+    assert "heartbeat" not in {member.value for member in EventType}
+    assert "heartbeat" not in {member.value for member in Source}
+    with pytest.raises(LedgerFormatError, match=f"unknown {key}"):
+        from_json(json.dumps(_record(**{key: "heartbeat"})))
 
 
 def test_new_fills_version_and_id():

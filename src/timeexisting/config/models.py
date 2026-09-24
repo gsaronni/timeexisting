@@ -78,7 +78,7 @@ class DriftConfig:
 
 @dataclass(frozen=True, slots=True)
 class CollectorConfig:
-    heartbeat: timedelta
+    tick: timedelta
     poll: timedelta
 
 

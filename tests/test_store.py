@@ -16,8 +16,8 @@ def _event(host: str = "laptop", minutes: int = 0, **overrides) -> Event:
         "ts": _T0 + timedelta(minutes=minutes),
         "host": host,
         "profile": "work",
-        "event": EventType.HEARTBEAT,
-        "source": Source.HEARTBEAT,
+        "event": EventType.COLLECTOR_START,
+        "source": Source.COLLECTOR,
     }
     return Event.new(**(fields | overrides))
 

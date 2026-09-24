@@ -129,7 +129,7 @@ def _build_drift(table: dict) -> DriftConfig:
 
 def _build_collector(table: dict) -> CollectorConfig:
     return CollectorConfig(
-        heartbeat=parse_duration(_field(table, "heartbeat", "collector")),
+        tick=parse_duration(_field(table, "tick", "collector")),
         poll=parse_duration(_field(table, "poll", "collector")),
     )
 

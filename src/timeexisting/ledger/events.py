@@ -30,7 +30,6 @@ class LedgerFormatError(ValueError):
 class EventType(StrEnum):
     COLLECTOR_START = "collector_start"
     COLLECTOR_STOP = "collector_stop"
-    HEARTBEAT = "heartbeat"
     LOCK = "lock"
     UNLOCK = "unlock"
     SUSPEND = "suspend"
@@ -47,7 +46,7 @@ class Source(StrEnum):
     WIN32 = "win32"
     EVENTLOG = "eventlog"
     DBUS = "dbus"
-    HEARTBEAT = "heartbeat"
+    COLLECTOR = "collector"
     MANUAL = "manual"
     BACKFILL = "backfill"
 
@@ -59,7 +58,7 @@ class Confidence(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One ledger line. `ts` is always aware UTC: an aware timestamp in any other zone is converted, a naive one is rejected. `data` holds event-specific string fields added by later phases and is empty for the collector's own events."""
+    """One ledger line. `ts` is always aware UTC: an aware timestamp in any other zone is converted, a naive one is rejected. `data` holds event-specific string fields, such as the `reason` on `collector_start` and `collector_stop`."""
 
     v: int
     id: str

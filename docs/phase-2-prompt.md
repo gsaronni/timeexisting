@@ -6,7 +6,7 @@ Paste this as the first message in a new Claude Code session at the repository r
 
 You are working on `timeexisting`. Read `CLAUDE.md`, `docs/logs.org`, and `docs/timeexisting-roadmap.org` sections 3, 5 and 19 before doing anything. Phase 1 is complete and tagged `phase-1`.
 
-**Phase 2 scope: persistence. The headless collector, the append-only ledger, replay into a timeline, the single-instance lockfile, diagnostic logging, clean shutdown on Windows logoff, and the Startup shortcut. The collector records its own presence only: `collector_start`, `heartbeat`, `collector_stop`. No lock or sleep detection, no absence classification, no recovery logic, no balances; those are phases 3 and 4. The viewer does not read the ledger for display in this phase beyond a collector status line.**
+**Phase 2 scope: persistence. The headless collector, the append-only ledger, replay into a timeline, the single-instance lockfile, diagnostic logging, clean shutdown on Windows logoff, and the Startup shortcut. The collector records its own presence only, as transitions: `collector_start` and `collector_stop`. Liveness between them is a per-tick checkpoint file, never a ledger line. The clock-jump suspend inference in step 6 is the only sleep signal; no lock detection, no OS-level sleep detection, no absence classification, no recovery logic, no balances; those are phases 3 and 4. The viewer does not read the ledger for display in this phase beyond a collector status line.**
 
 Work in small, reviewable steps. After each step run `ruff format .`, `ruff check .` and `pytest`, show me the result, and stop for review. One concrete step at a time. Full replacement files, not fragments. Append a session entry to `docs/logs.org` and update its phase status table as your final step.
 
@@ -50,11 +50,21 @@ Work in small, reviewable steps. After each step run `ruff format .`, `ruff chec
 
 ## Step 4: replay
 
-`ledger/replay.py`:
+First, retire the heartbeat vocabulary:
 
-- `Timeline`, frozen: the ordered events, a tuple of `Presence(start, end, host)` intervals, and a tuple of `Gap(start, end, host, opened_by, closed_by)` where `opened_by` and `closed_by` are the event types at each edge.
-- `replay(events, heartbeat: timedelta) -> Timeline`: per host, consecutive heartbeats no more than `2 × heartbeat` apart merge into one presence interval; a longer spacing produces a gap. `collector_start` opens an interval, `collector_stop` closes one. A gap whose opening edge is a `heartbeat` rather than a `collector_stop` is an unclean stop; record that fact on the gap, do not classify it further.
-- Heartbeats are not retained in the `Timeline` events tuple; they have been collapsed.
+- Remove `EventType.HEARTBEAT` from `ledger/events.py`.
+- Rename `Source.HEARTBEAT` to `Source.COLLECTOR`, value `collector`, per section 5.
+- Rename the config key `collector.heartbeat` to `collector.tick` in the config model, the loader, `defaults.toml` and the tests.
+- Update the helper in `tests/test_store.py` to build a `collector_start` with source `collector`, and the enum value sets in `tests/test_events.py`.
+
+Then `ledger/replay.py`:
+
+- `Timeline`, frozen: every event in order (nothing is collapsed, since the ledger holds transitions only), a tuple of `Presence` intervals and a tuple of `Gap`s.
+- `Presence(start, end, host, end_inferred)`: `end` is the `ts` of the closing `collector_stop`, or `None` when there is none. `end_inferred` is true when that stop has confidence `inferred`.
+- `Gap(start, end, host, start_inferred, end_inferred, reason)`: the span from a `collector_stop` to the same host's next `collector_start`. `start_inferred` and `end_inferred` carry the confidence of each edge; `reason` is the opening stop's `data["reason"]` (`unclean`, `suspended`, `signal`, `stop_file`, `session_end`, ...), recorded, not classified.
+- `replay(events) -> Timeline`: sorts by `(ts, id)` itself rather than trusting input order. Per host, each `collector_start` pairs with the next `collector_stop` into a presence interval, and that stop plus the next start bound a gap.
+- A `collector_start` followed by another `collector_start` with no stop between is an unclosed interval: `end=None`, kept, not guessed. No gap is produced after it, since where it ended is unknown. A host's final start with no stop is likewise `end=None`: the running collector, or one not yet recovered.
+- A `collector_stop` with no open interval produces nothing and is kept in the events tuple. Events of any other type are kept and ignored for pairing.
 - Pure: `domain`-style rules apply to this module. No clock, no I/O, no Rich. Extend the architecture test to cover `ledger/replay.py` and `ledger/events.py`.
 
 ## Step 5: lockfile
@@ -72,8 +82,12 @@ Work in small, reviewable steps. After each step run `ruff format .`, `ruff chec
 
 `collector/daemon.py`:
 
-- `run_collector(clock, sleep, cfg, *, max_ticks=None)`: acquire the lock, write `collector_start`, then loop: write `heartbeat` every `cfg.collector.heartbeat`, check `stop_file()` every tick, exit when it exists or `max_ticks` is reached. On any exit, write `collector_stop` with `data={"reason": ...}`, release the lock, delete the stop file.
-- `clock` and `sleep` are injected so tests run hundreds of ticks instantly. Heartbeat spacing is measured against the clock, not by counting sleeps.
+- `run_collector(clock, sleep, cfg, *, max_ticks=None)`: acquire the lock, recover a leftover checkpoint (below), write `collector_start` with `data={"reason": "launch"}`, then tick every `cfg.collector.tick`. Each tick writes the checkpoint, checks for a clock jump, and checks `stop_file()` and the signal flag; exit when either is set or `max_ticks` is reached. On any exit, write `collector_stop` with `data={"reason": ...}` (`stop_file`, `signal`, `max_ticks`), delete the checkpoint, release the lock, delete the stop file.
+- No ledger line is written per tick. The ledger sees `collector_start` once at launch and `collector_stop` once at exit, plus the suspend pair below.
+- Checkpoint: `paths.checkpoint_file(host)` is `state_dir()/checkpoint-<host>.json`, holding `{"ts": <ISO 8601 UTC>, "pid": <int>}`. Each tick writes `checkpoint-<host>.json.tmp` beside it, fsyncs, and `os.replace`s it over the checkpoint. A `PermissionError` on replace (Windows, while something else holds the file) is logged at WARNING and retried on the next tick; the loop carries on.
+- Recovery, after acquiring the lock and before `collector_start`: if a checkpoint exists, the previous run ended uncleanly. Write `collector_stop` at the checkpoint's `ts`, confidence `inferred`, `data={"reason": "unclean"}`, then delete the checkpoint. A checkpoint that cannot be parsed is logged and deleted, and no stop is written for it: nothing is guessed.
+- Suspend: if the clock shows more than `2 × cfg.collector.tick` since the previous tick, the machine was suspended. Write `collector_stop` at the previous tick's `ts` (confidence `inferred`, reason `suspended`), then `collector_start` at now (confidence `observed`, reason `resumed`). A clock that moved backwards is logged and is not a suspend.
+- `clock` and `sleep` are injected so tests run hundreds of ticks instantly. Tick spacing and the jump check are measured against the clock, not by counting sleeps.
 - Day state is never captured at startup. Nothing in the loop knows what day it is; it writes timestamps. This is what makes midnight a non-event.
 - `SIGINT` (and `SIGBREAK` on Windows, `SIGTERM` elsewhere) set a stop flag checked each tick, so Ctrl+C in a terminal produces a clean `collector_stop` with reason `signal`.
 - `cli.py`: `te collect` runs the loop in the current process, in the foreground. Detaching is the caller's job, never the collector's. `te collect status` prints pid, host and start time, or "not running". `te collect stop` creates the stop file and waits up to two poll intervals for the lock to disappear, reporting either outcome.
@@ -83,7 +97,7 @@ Work in small, reviewable steps. After each step run `ruff format .`, `ruff chec
 `collector/session_win32.py`, imported only on Windows:
 
 - When a console is attached, register a handler via `SetConsoleCtrlHandler` for `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT`.
-- Always, start a daemon thread that creates a message-only window with `pywin32` (`win32gui.CreateWindowEx` with `HWND_MESSAGE` as parent) and handles `WM_QUERYENDSESSION` (return `True`) and `WM_ENDSESSION` (when `wParam` is true, write `collector_stop` with reason `session_end`, fsync, release the lock).
+- Always, start a daemon thread that creates a message-only window with `pywin32` (`win32gui.CreateWindowEx` with `HWND_MESSAGE` as parent) and handles `WM_QUERYENDSESSION` (return `True`) and `WM_ENDSESSION` (when `wParam` is true, write `collector_stop` with reason `session_end`, fsync, delete the checkpoint, release the lock). Session end is a clean stop; a checkpoint left behind here would make the next login write a spurious `unclean` stop.
 - Both paths call one shutdown function that is idempotent, since logoff can deliver both.
 - Unit-test the shutdown function directly and the window procedure by calling it with synthetic messages. Live verification is manual and is listed under "Done when". Tell me if `pywin32` cannot create the window under `pythonw`; this is the step most likely to need a second approach.
 
@@ -105,9 +119,17 @@ Work in small, reviewable steps. After each step run `ruff format .`, `ruff chec
 
 - `tests/test_events.py`: round trip for every field, fixed key order, naive timestamp rejected, unknown version rejected, ids are unique and sort in creation order.
 - `tests/test_store.py`: append then read, fsync called once per append (monkeypatch `os.fsync`), malformed lines skipped and counted, two shards merged in timestamp order.
-- `tests/test_replay.py`: continuous heartbeats give one interval; a spacing over twice the heartbeat gives a gap; unclean stop recorded on the gap; two hosts kept separate; a run crossing local midnight gives one continuous interval; a run across the night of 24 to 25 October 2026 (fall-back, local 03:00 becomes 02:00) gives strictly increasing UTC timestamps and no negative interval.
+- `tests/test_events.py`: `heartbeat` is no longer an `EventType`, and a ledger line carrying it is rejected.
+- `tests/test_replay.py`: a start and a stop give one interval; stop then start give a gap carrying the stop's reason; an inferred stop (`unclean`, `suspended`) sets `end_inferred` on the interval and `start_inferred` on the gap; start, start gives an unclosed interval and no gap; a host's final start is open; a stop with no open interval produces nothing; unsorted input gives the same timeline; two hosts kept separate; a run crossing local midnight gives one continuous interval; a run across the night of 24 to 25 October 2026 (fall-back, local 03:00 becomes 02:00) gives strictly increasing UTC timestamps and no negative interval.
 - `tests/test_lockfile.py`: acquire, second acquire raises `AlreadyRunning`, stale pid reclaimed, recycled pid with mismatched `create_time` treated as stale, release does not remove another process's lock.
-- `tests/test_daemon.py`: N ticks on a fixed clock produce `collector_start`, the expected heartbeats, and `collector_stop`; stop file ends the loop within one tick; signal flag ends it with reason `signal`.
+- `tests/test_daemon.py`:
+  - N ticks on a fixed-step clock write exactly `collector_start` (reason `launch`, source `collector`) and `collector_stop` to the ledger: no ledger line per tick.
+  - The checkpoint holds the latest tick's `ts` and our pid after every tick; a clean stop deletes it.
+  - Recovery from a leftover checkpoint writes an inferred `collector_stop` with reason `unclean` at the checkpoint's `ts`, before `collector_start`, and deletes it; an unparseable checkpoint is deleted and writes nothing.
+  - A clock jump over `2 × tick` writes the `suspended`/`resumed` pair at the previous tick and at now; a jump of exactly `2 × tick` writes nothing; a backwards clock writes nothing.
+  - A `PermissionError` from `os.replace` is logged, the loop continues, and the next tick's checkpoint lands.
+  - Ticking across the 25 October 2026 fall-back writes no suspend pair.
+  - Stop file ends the loop within one tick with reason `stop_file`; signal flag ends it with reason `signal`.
 - Ledger fixtures, if any, go under `tests/fixtures/` as `.jsonl`; the `.gitignore` negation allows them.
 
 ## Conventions
@@ -116,7 +138,9 @@ As in `CLAUDE.md`. Python 3.14. Aware UTC everywhere in the ledger. `ledger/even
 
 ## Done when
 
-- `te collect` in a terminal writes `collector_start` and a heartbeat every 30 seconds to `%LOCALAPPDATA%\timeexisting\ledger\<host>.jsonl`; Ctrl+C writes `collector_stop` with reason `signal`.
+- `te collect` in a terminal writes only `collector_start` with reason `launch` to `%LOCALAPPDATA%\timeexisting\ledger\<host>.jsonl` while running, and rewrites `%LOCALAPPDATA%\timeexisting\checkpoint-<host>.json` every 30 seconds; Ctrl+C writes `collector_stop` with reason `signal` and deletes the checkpoint.
+- Killing the collector in Task Manager and restarting it writes an inferred `collector_stop` with reason `unclean` whose `ts` is within one interval of the kill, followed by `collector_start`.
+- Sleeping the laptop for five minutes with the collector running produces an inferred `collector_stop` with reason `suspended` at the last tick before sleep and a `collector_start` with reason `resumed` at wake.
 - A second `te collect` in another terminal refuses with the pack message and exits non-zero.
 - `te collect stop` stops a running collector within one poll and it writes `collector_stop` with reason `stop_file`.
 - Ending the collector from Task Manager leaves a stale lock that the next `te collect` reclaims silently.

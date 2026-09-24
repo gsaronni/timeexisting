@@ -75,10 +75,14 @@ The dashboard is not open all day. The collector must survive the terminal closi
 ** Collector lifecycle
 
 - Lockfile at =state/collector.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
+- The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json= with the current UTC timestamp and the collector's PID: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint.
+- Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick.
+- Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= after a suspend.
+- Suspend. If the clock shows more than twice the tick interval since the previous tick, the machine was suspended. The collector writes =collector_stop= at the previous tick's timestamp (=inferred=, reason =suspended=) and =collector_start= at now (=observed=, reason =resumed=).
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile, attach. Stale lock, reclaim and spawn.
 - =q= quits the viewer and leaves the collector. =Q= stops both.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
-- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. It creates a hidden message-only window (=HWND_MESSAGE= parent) on a daemon thread that answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, then releases the lock, before the process dies.
+- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. It creates a hidden message-only window (=HWND_MESSAGE= parent) on a daemon thread that answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, deletes the checkpoint, then releases the lock, before the process dies.
 - When =te collect= runs in a terminal, a console control handler (=SetConsoleCtrlHandler=) is registered as well, for =CTRL_CLOSE_EVENT=, =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT=. Both paths call one idempotent shutdown function, since logoff can deliver both.
 - The collector runs across midnight without restarting. Day state is derived per tick from the current date, never captured at startup.
 
@@ -188,17 +192,19 @@ One JSON object per line, UTF-8, =\n= terminated.
 | =ts= | Aware UTC, ISO 8601. |
 | =host= | Shard name. |
 | =profile= | =work=, =fun=, =homelab=. Only =work= feeds the 37h accounting. Mapped from hostname in config. |
-| =event= | =collector_start=, =collector_stop=, =heartbeat=, =lock=, =unlock=, =suspend=, =resume=, =classify=, =note=, =dayflag=, =manual_start=, =manual_end=, =void=. |
-| =source= | =win32=, =eventlog=, =dbus=, =heartbeat=, =manual=, =backfill=. |
+| =event= | =collector_start=, =collector_stop=, =lock=, =unlock=, =suspend=, =resume=, =classify=, =note=, =dayflag=, =manual_start=, =manual_end=, =void=. |
+| =source= | =win32=, =eventlog=, =dbus=, =collector=, =manual=, =backfill=. |
 | =confidence= | =observed= or =inferred=. Rendered differently, never equated. |
 
-** Heartbeat
+** Transitions, not heartbeats
 
-The collector appends =heartbeat= every 30 seconds while alive. A gap bounded by =lock=/=unlock= or =suspend=/=resume= is an absence. A gap with no heartbeats and no boundary events is collector downtime, a different fact, never rendered as presence or absence.
+The ledger records transitions only. The collector ticks every 30 seconds (=collector.tick=), but a tick writes nothing to the ledger; it overwrites the checkpoint file (section 3), which is state, not ledger. =collector_start= and =collector_stop= bound the collector's own presence, and every =collector_start= carries a reason, =launch= or =resumed=. An edge the collector could not observe directly, a stop recovered from a leftover checkpoint (reason =unclean=) or a stop placed at the last tick before a clock jump (reason =suspended=), is written with confidence =inferred= and is accurate to one tick.
+
+A gap bounded by =lock=/=unlock= or =suspend=/=resume= is an absence. A span between a =collector_stop= and the next =collector_start= with no boundary events is collector downtime, a different fact, never rendered as presence or absence.
 
 ** Writes and replay
 
-Append with =O_APPEND=, flush and =os.fsync= per write. Malformed lines on read are skipped, counted and logged, never fatal. The whole ledger replays into memory on start; heartbeats collapse into presence intervals and are discarded. No database. The ability to fix a line with a text editor is a feature, and =te edit= exists so that it is never necessary.
+Append with =O_APPEND=, flush and =os.fsync= per write. Malformed lines on read are skipped, counted and logged, never fatal. The whole ledger replays into memory on start; per host, each =collector_start= pairs with the next =collector_stop= into a presence interval, and a start followed by another start with no stop between is kept as an unclosed interval rather than guessed. No database. The ability to fix a line with a text editor is a feature, and =te edit= exists so that it is never necessary.
 
 
 * 6. Presence Detection
@@ -207,7 +213,7 @@ The machine sleeps five minutes after the screen turns off, three on battery. Al
 
 | Tier | Mechanism | Platform | Confidence |
 |---|---|---|---|
-| 1 | Monotonic clock versus wall clock jump per tick | All | =inferred=, one-heartbeat resolution |
+| 1 | Monotonic clock versus wall clock jump per tick | All | =inferred=, one-tick resolution |
 | 2 | Power-Troubleshooter Event ID 1, System log: exact sleep and wake times, readable by a normal user | Windows | =observed= |
 | 2 | Kernel-Power 42 and 107 as corroboration | Windows | =observed= |
 | 2 | =OpenInputDesktop= via =ctypes=, polled, for lock without sleep | Windows | =observed= |
@@ -238,12 +244,15 @@ The queue is non-blocking, retained indefinitely, and shown as a single count. =
 
 * 8. Recovery
 
+Phase 2's checkpoint recovery (section 3) owns collector death and suspend, at tick resolution: a leftover checkpoint becomes an inferred =collector_stop= with reason =unclean=, and a clock jump becomes an inferred =collector_stop= with reason =suspended= followed by =collector_start= with reason =resumed=. Phase 3 does not detect suspend independently. It refines the edges of those gaps with event-log timestamps, replacing tick-resolution boundaries with observed ones.
+
 On collector start, read the tail of this host's shard.
 
 | Last event | Meaning | Action |
 |---|---|---|
-| =collector_stop= | Clean shutdown | No gap |
-| =heartbeat=, =lock=, =suspend= | Unclean | Classify the gap from that timestamp to now |
+| =collector_stop= with reason =unclean= or =suspended= | Unclean, recovered at tick resolution | Classify the gap from that timestamp to the next =collector_start= |
+| =collector_stop=, any other reason | Clean shutdown | No gap |
+| =collector_start=, =lock=, =suspend= | Unclean, no checkpoint recovered | Classify the gap from that timestamp to now |
 | Nothing today | First run | Normal start resolution |
 
 Gap classification, rules in order, prompt only if none matches:
@@ -446,8 +455,8 @@ green_max = "30m"
 amber_max = "50m"
 
 [collector]
-heartbeat = "30s"
-poll      = "30s"
+tick = "30s"
+poll = "30s"
 
 [notify]
 kitchen_start  = 13:30:00
@@ -477,7 +486,7 @@ Each phase is one implementation session and leaves the program working. No phas
 |---|---|---|
 | 0 | Migrate =_legacy.py= into the package, fix all ten defects, =Clock= protocol, pack loader, =theme.py=, tests for the phase resolver, delete =_legacy.py= | Same behaviour, correct, structured |
 | 1 | Config, schedule builder, resolver, =--at= and =--speed=, new hours, day flags | Working tracker, no ledger |
-| 2 | Collector, heartbeat, shards, replay, lockfile, platform dirs, logging, startup script, control handler | Persistence |
+| 2 | Collector, checkpoint tick, clock-jump suspend inference, shards, replay, lockfile, platform dirs, logging, startup script, control handler | Persistence |
 | 3 | Sleep and lock detection, monotonic jump, event log, recovery | Absences are real |
 | 4 | Flex balances, calendar, leave, drift, recovery estimate, classification rules and queue | The 37h answer |
 | 5 | Power module, countdown, postponement, =z=, hibernation check | The original purpose |

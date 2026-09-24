@@ -17,6 +17,14 @@ already_running = [
     "Another of you already keeps the vigil. Two witnesses to the same slow ending would be excessive, even here.",
 ]
 
+[collect.status]
+running = ["The collector, pid {pid}, keeps its vigil on {host}. It has watched since {since}."]
+not_running = ["No collector watches. Time passes unrecorded, which is its natural state."]
+
+[collect.stop]
+stopped = ["The collector has stopped watching. The hours go back to being nobody's business."]
+timeout = ["The collector was told to stop and has not yet obeyed. It will read the order on its next tick."]
+
 [common]
 current_time = ["Current time: {time}"]
 

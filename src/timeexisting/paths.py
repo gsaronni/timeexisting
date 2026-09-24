@@ -2,9 +2,9 @@
 
 The only module that knows these locations; everything else asks it. Resolved through `platformdirs`, never the repository, never a cloud-synced path by default. `TIMEEXISTING_CONFIG_DIR` and `TIMEEXISTING_STATE_DIR` override the two roots when set, for anyone who wants one config and one ledger synced across machines by their own means.
 
-Every per-machine file in the state directory carries the host in its name (`<role>-<host>.lock`, `collector-<host>.stop`, `logs/<role>-<host>.log`, like the ledger shards), so machines sharing a synced state directory never contend for the same file.
+Every per-machine file in the state directory carries the host in its name (`<role>-<host>.lock`, `collector-<host>.stop`, `checkpoint-<host>.json`, `logs/<role>-<host>.log`, like the ledger shards), so machines sharing a synced state directory never contend for the same file.
 
-Nothing is created at import. The state-side accessors that hand out a location to write into (`ledger_dir`, `log_dir`, `lock_file`, `stop_file`) create their directory on first use; `config_dir` and `state_dir` only resolve.
+Nothing is created at import. The state-side accessors that hand out a location to write into (`ledger_dir`, `log_dir`, `lock_file`, `stop_file`, `checkpoint_file`) create their directory on first use; `config_dir` and `state_dir` only resolve.
 """
 
 import os
@@ -83,3 +83,8 @@ def lock_file(role: str) -> Path:
 
 def stop_file() -> Path:
     return _ensure(state_dir()) / f"collector-{current_host()}.stop"
+
+
+def checkpoint_file(host: str) -> Path:
+    """The collector's per-tick liveness file for `host`. Takes the host explicitly, unlike the others, because recovery reads the checkpoint of the host whose shard it inspects."""
+    return _ensure(state_dir()) / f"checkpoint-{sanitise_host(host)}.json"

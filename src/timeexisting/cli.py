@@ -2,11 +2,16 @@
 
 import argparse
 import logging
+import math
 import sys
+import threading
+import time as time_module
+from collections.abc import Callable
 from datetime import UTC, datetime, time, timedelta
 from importlib.resources import files
 
 from timeexisting import logging_setup, paths
+from timeexisting.collector import daemon, lockfile
 from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
@@ -160,6 +165,13 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers.add_parser("init", help="Write the packaged defaults there if absent.")
     config_subparsers.add_parser("check", help="Load and validate the configuration.")
 
+    collect_parser = subparsers.add_parser(
+        "collect", help="Run the collector in the foreground, or inspect or stop a running one."
+    )
+    collect_subparsers = collect_parser.add_subparsers(dest="collect_command")
+    collect_subparsers.add_parser("status", help="Report the running collector, if any.")
+    collect_subparsers.add_parser("stop", help="Ask the running collector to stop and wait for it.")
+
     return parser
 
 
@@ -248,6 +260,57 @@ def _run_config_command(command: str) -> None:
         _config_check()
 
 
+_STOP_POLL_SECONDS = 0.25
+
+
+def _collect_run(cfg: Config) -> None:
+    stop_event = threading.Event()
+    try:
+        with daemon.signal_handlers(stop_event):
+            daemon.run_collector(
+                SystemClock(), daemon.interruptible_sleep(stop_event), cfg, stop_event=stop_event
+            )
+    except (lockfile.AlreadyRunning, lockfile.LockError) as error:
+        logger.warning("collector refused to start: %s", error)
+        print(pick("instance.already_running"), file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+def _collect_status() -> None:
+    owner = lockfile.status(daemon.ROLE)
+    if owner is None:
+        print(pick("collect.status.not_running"))
+        return
+    since = owner.started.astimezone(local_timezone())
+    print(
+        pick("collect.status.running").format(pid=owner.pid, host=owner.host, since=f"{since:%Y-%m-%d %H:%M}")
+    )
+
+
+def _collect_stop(cfg: Config, *, sleep: Callable[[float], object] = time_module.sleep) -> None:
+    if lockfile.status(daemon.ROLE) is None:
+        print(pick("collect.status.not_running"))
+        return
+    paths.stop_file().touch()
+    polls = math.ceil(2 * cfg.collector.poll.total_seconds() / _STOP_POLL_SECONDS)
+    for _ in range(polls):
+        sleep(_STOP_POLL_SECONDS)
+        if lockfile.status(daemon.ROLE) is None:
+            print(pick("collect.stop.stopped"))
+            return
+    print(pick("collect.stop.timeout"))
+    raise SystemExit(1)
+
+
+def _run_collect_command(command: str | None, cfg: Config) -> None:
+    if command is None:
+        _collect_run(cfg)
+    elif command == "status":
+        _collect_status()
+    elif command == "stop":
+        _collect_stop(cfg)
+
+
 def _load_config_or_exit() -> Config:
     try:
         return loader.load_config()
@@ -259,13 +322,19 @@ def _load_config_or_exit() -> Config:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    logging_setup.configure("viewer")
-    logger.info("viewer started: %s", sys.argv[1:] if argv is None else argv)
+    runs_collector = args.command == "collect" and args.collect_command is None
+    role = daemon.ROLE if runs_collector else "viewer"
+    logging_setup.configure(role)
+    logger.info("%s started: %s", role, sys.argv[1:] if argv is None else argv)
     if args.command == "config":
         _run_config_command(args.config_command)
         return
 
     cfg = _load_config_or_exit()
+
+    if args.command == "collect":
+        _run_collect_command(args.collect_command, cfg)
+        return
 
     if args.demo:
         run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)

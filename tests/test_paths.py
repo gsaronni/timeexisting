@@ -24,6 +24,8 @@ def test_per_machine_files_carry_the_host(monkeypatch):
     assert paths.lock_file("collector") == paths.state_dir() / "collector-EXAMPLE-HOST.lock"
     assert paths.lock_file("viewer") == paths.state_dir() / "viewer-EXAMPLE-HOST.lock"
     assert paths.stop_file() == paths.state_dir() / "collector-EXAMPLE-HOST.stop"
+    assert paths.checkpoint_file("EXAMPLE-HOST") == paths.state_dir() / "checkpoint-EXAMPLE-HOST.json"
+    assert paths.checkpoint_file("odd/host").name == "checkpoint-odd_host.json"
 
 
 def test_two_hosts_sharing_a_state_dir_never_share_a_file(monkeypatch):

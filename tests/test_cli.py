@@ -3,6 +3,8 @@ from datetime import UTC, date, datetime, time
 import pytest
 
 from timeexisting import cli, paths
+from timeexisting.collector import lockfile
+from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.schedule import DayFlag
 
@@ -218,3 +220,69 @@ def test_resolve_start_prompts_right_up_to_latest_credit(cfg):
     args = cli.build_parser().parse_args([])
     start = cli._resolve_start(args, cfg, _at(18, 59), read=lambda _p: "08:00", write=lambda _t: None)
     assert start == time(8, 0)
+
+
+def test_collect_parses_with_and_without_a_subcommand():
+    parser = cli.build_parser()
+    assert parser.parse_args(["collect"]).collect_command is None
+    assert parser.parse_args(["collect", "status"]).collect_command == "status"
+    assert parser.parse_args(["collect", "stop"]).collect_command == "stop"
+
+
+def test_collect_status_when_nothing_runs(capsys):
+    cli.main(["collect", "status"])
+    assert capsys.readouterr().out.strip() == phrases.pick("collect.status.not_running")
+
+
+def test_collect_status_reports_the_live_owner(capsys):
+    lock = lockfile.acquire("collector")
+    cli.main(["collect", "status"])
+    out = capsys.readouterr().out
+    since = lock.status.started.astimezone(cli.local_timezone())
+    assert str(lock.status.pid) in out
+    assert lock.status.host in out
+    assert f"{since:%Y-%m-%d %H:%M}" in out
+
+
+def test_collect_refuses_when_a_collector_already_runs(capsys):
+    lockfile.acquire("collector")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["collect"])
+    assert raised.value.code == 1
+    assert capsys.readouterr().err.strip() in _pool("instance.already_running")
+    assert paths.log_file("collector").exists()
+
+
+def test_collect_stop_when_nothing_runs(capsys, cfg):
+    cli._collect_stop(cfg, sleep=lambda _: pytest.fail("must not wait"))
+    assert capsys.readouterr().out.strip() == phrases.pick("collect.status.not_running")
+    assert not paths.stop_file().exists()
+
+
+def test_collect_stop_creates_the_stop_file_and_waits_for_the_lock(capsys, cfg):
+    lock = lockfile.acquire("collector")
+    polls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        polls.append(seconds)
+        assert paths.stop_file().exists()
+        if len(polls) == 3:
+            lockfile.release(lock)
+
+    cli._collect_stop(cfg, sleep=sleep)
+    assert len(polls) == 3
+    assert capsys.readouterr().out.strip() == phrases.pick("collect.stop.stopped")
+
+
+def test_collect_stop_gives_up_after_two_poll_intervals(capsys, cfg):
+    lockfile.acquire("collector")
+    waited: list[float] = []
+    with pytest.raises(SystemExit) as raised:
+        cli._collect_stop(cfg, sleep=waited.append)
+    assert raised.value.code == 1
+    assert sum(waited) == pytest.approx(2 * cfg.collector.poll.total_seconds())
+    assert capsys.readouterr().out.strip() == phrases.pick("collect.stop.timeout")
+
+
+def _pool(key: str) -> set[str]:
+    return set(phrases._pool(phrases.DEFAULT_VOICE, phrases.DEFAULT_LOCALE, key))

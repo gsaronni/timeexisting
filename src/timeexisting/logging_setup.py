@@ -1,4 +1,4 @@
-"""Diagnostic logging: one rotating file per role, `collector.log` and `viewer.log`.
+"""Diagnostic logging: one rotating file per role and host, `logs/collector-<host>.log` and `logs/viewer-<host>.log`.
 
 One file per role because the collector and the viewer run at the same time, and Windows cannot rename a file another process holds open: with a shared file every rollover would fail and records would be dropped until the other process let go.
 

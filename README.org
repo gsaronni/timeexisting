@@ -32,7 +32,7 @@ To share one config and one ledger across devices, point these at a folder you s
 | =TIMEEXISTING_CONFIG_DIR= | the config directory, holding =config.toml= |
 | =TIMEEXISTING_STATE_DIR= | the state directory, holding =ledger\=, =logs\= and the lockfiles |
 
-The ledger is sharded one file per host, so machines writing at the same time never touch the same file.
+Every per-machine file in the state directory carries the host in its name: the ledger shard (=ledger\<host>.jsonl=), the lockfiles, the checkpoint, the stop file and the diagnostic logs. Machines sharing one synced state directory therefore never write to the same file.
 
 * Specification
 

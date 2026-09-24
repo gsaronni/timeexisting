@@ -19,7 +19,7 @@ def test_each_role_writes_its_own_file(role):
     line = paths.log_file(role).read_text(encoding="utf-8").strip()
     assert line.endswith(f"{role} INFO timeexisting.test: heartbeat written")
     assert line[:4].isdigit()  # asctime leads
-    assert [path.name for path in paths.log_dir().iterdir()] == [f"{role}.log"]
+    assert [path.name for path in paths.log_dir().iterdir()] == [paths.log_file(role).name]
 
 
 def test_roles_never_share_a_file():
@@ -55,7 +55,8 @@ def test_rotation_stays_within_the_role():
     logging_setup.reset()
 
     names = sorted(path.name for path in paths.log_dir().iterdir())
-    assert names == ["collector.log", "collector.log.1", "collector.log.2", "collector.log.3"]
+    base = paths.log_file("collector").name
+    assert names == [base, f"{base}.1", f"{base}.2", f"{base}.3"]
 
 
 def test_configure_twice_does_not_stack_handlers():

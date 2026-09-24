@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from timeexisting import paths
 
 
@@ -12,14 +14,52 @@ def test_config_file_lives_under_config_dir():
 def test_ledger_and_logs_live_under_state_dir():
     assert paths.ledger_dir() == paths.state_dir() / "ledger"
     assert paths.log_dir() == paths.state_dir() / "logs"
-    assert paths.log_file("collector") == paths.log_dir() / "collector.log"
-    assert paths.log_file("viewer") == paths.log_dir() / "viewer.log"
+    assert paths.log_file("collector").parent == paths.log_dir()
 
 
-def test_lock_and_stop_files_live_under_state_dir():
-    assert paths.lock_file("collector") == paths.state_dir() / "collector.lock"
-    assert paths.lock_file("viewer") == paths.state_dir() / "viewer.lock"
-    assert paths.stop_file() == paths.state_dir() / "collector.stop"
+def test_per_machine_files_carry_the_host(monkeypatch):
+    monkeypatch.setattr(paths.platform, "node", lambda: "EXAMPLE-HOST")
+    assert paths.log_file("collector") == paths.log_dir() / "collector-EXAMPLE-HOST.log"
+    assert paths.log_file("viewer") == paths.log_dir() / "viewer-EXAMPLE-HOST.log"
+    assert paths.lock_file("collector") == paths.state_dir() / "collector-EXAMPLE-HOST.lock"
+    assert paths.lock_file("viewer") == paths.state_dir() / "viewer-EXAMPLE-HOST.lock"
+    assert paths.stop_file() == paths.state_dir() / "collector-EXAMPLE-HOST.stop"
+
+
+def test_two_hosts_sharing_a_state_dir_never_share_a_file(monkeypatch):
+    def files_for(host: str) -> set:
+        monkeypatch.setattr(paths.platform, "node", lambda: host)
+        return {paths.log_file("collector"), paths.lock_file("collector"), paths.stop_file()}
+
+    assert files_for("laptop").isdisjoint(files_for("desktop"))
+
+
+def test_per_machine_filenames_use_the_sanitised_host(monkeypatch):
+    monkeypatch.setattr(paths.platform, "node", lambda: "odd/host")
+    assert paths.lock_file("collector").name == "collector-odd_host.lock"
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("EXAMPLE-HOST", "EXAMPLE-HOST"),
+        ("fedora.local", "fedora.local"),
+        ("my box/with:odd*chars", "my_box_with_odd_chars"),
+        ("..hidden", "hidden"),
+        ("  ", "unknown-host"),
+        ("", "unknown-host"),
+        ("con", "con_"),
+        ("NUL.home", "NUL.home_"),
+        ("Hvidovre-Ø", "Hvidovre-_"),
+    ],
+)
+def test_sanitise_host(host, expected):
+    assert paths.sanitise_host(host) == expected
+
+
+def test_current_host_comes_from_platform_node(monkeypatch):
+    monkeypatch.setattr(paths.platform, "node", lambda: "odd/host")
+    assert paths.current_host() == "odd_host"
 
 
 def test_environment_overrides_both_roots(tmp_path, monkeypatch):

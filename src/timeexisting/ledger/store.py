@@ -5,8 +5,6 @@ Writes are one event per call: open with `O_APPEND`, write one UTF-8 encoded lin
 
 import logging
 import os
-import platform
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,11 +16,6 @@ logger = logging.getLogger(__name__)
 SHARD_SUFFIX = ".jsonl"
 ENCODING = "utf-8"
 
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-_WINDOWS_RESERVED = frozenset(
-    {"CON", "PRN", "AUX", "NUL"} | {f"COM{n}" for n in range(1, 10)} | {f"LPT{n}" for n in range(1, 10)}
-)
-_FALLBACK_HOST = "unknown-host"
 # Windows opens descriptors in text mode unless told otherwise, which would turn every "\n" into "\r\n". Read access too, so `append` can check the last byte before writing.
 _WRITE_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
 
@@ -33,23 +26,8 @@ class ReadResult:
     malformed: int
 
 
-def sanitise_host(host: str) -> str:
-    """A hostname reduced to a safe, portable filename stem: anything outside letters, digits, `.`, `_` and `-` becomes `_`, leading dots are dropped, and Windows device names are suffixed."""
-    safe = _UNSAFE.sub("_", host.strip()).lstrip(".")
-    if not safe:
-        return _FALLBACK_HOST
-    if safe.split(".")[0].upper() in _WINDOWS_RESERVED:
-        safe = f"{safe}_"
-    return safe
-
-
-def current_host() -> str:
-    """This machine's shard name, from `platform.node()`. Written into every event's `host` field, so an event's host always names its shard."""
-    return sanitise_host(platform.node())
-
-
 def shard_path(host: str) -> Path:
-    return paths.ledger_dir() / f"{sanitise_host(host)}{SHARD_SUFFIX}"
+    return paths.ledger_dir() / f"{paths.sanitise_host(host)}{SHARD_SUFFIX}"
 
 
 def _ends_torn(descriptor: int) -> bool:

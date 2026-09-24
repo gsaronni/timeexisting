@@ -6,7 +6,7 @@ Paste this as the first message in a new Claude Code session at the repository r
 
 You are working on `timeexisting`. Read `CLAUDE.md`, `docs/logs.org`, and `docs/timeexisting-roadmap.org` sections 3, 5 and 19 before doing anything. Phase 1 is complete and tagged `phase-1`.
 
-**Phase 2 scope: persistence. The headless collector, the append-only ledger, replay into a timeline, the single-instance lockfile, diagnostic logging, clean shutdown on Windows logoff, and the Startup shortcut. The collector records its own presence only, as transitions: `collector_start` and `collector_stop`. Liveness between them is a per-tick checkpoint file, never a ledger line. The clock-jump suspend inference in step 6 is the only sleep signal; no lock detection, no OS-level sleep detection, no absence classification, no recovery logic, no balances; those are phases 3 and 4. The viewer does not read the ledger for display in this phase beyond a collector status line.**
+**Phase 2 scope: persistence. The headless collector, the append-only ledger, replay into a timeline, the single-instance lockfile, diagnostic logging, clean shutdown on Windows logoff, and the Startup shortcut. The collector records its own presence only, as transitions: `collector_start` and `collector_stop`. Liveness between them is a per-tick checkpoint file, never a ledger line. The clock-jump suspend inference in step 6 is the only sleep signal; no lock detection, no OS-level sleep detection, no absence classification, no recovery beyond the checkpoint recovery in step 6, no balances; those are phases 3 and 4. The viewer does not read the ledger for display in this phase beyond a collector status line.**
 
 Work in small, reviewable steps. After each step run `ruff format .`, `ruff check .` and `pytest`, show me the result, and stop for review. One concrete step at a time. Full replacement files, not fragments. Append a session entry to `docs/logs.org` and update its phase status table as your final step.
 
@@ -104,6 +104,7 @@ Then `ledger/replay.py`:
 ## Step 8: viewer spawns and reports the collector
 
 - On `te` startup, after config load and before the Rich surface: `status("collector")`. If none, spawn `pythonw.exe -m timeexisting collect` on Windows with `creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, or `python -m timeexisting collect` with `start_new_session=True` elsewhere, stdout and stderr to `DEVNULL`. Locate `pythonw.exe` beside `sys.executable`. Wait up to three seconds for the lock to appear; if it does not, continue without it and show that in the status line.
+- The viewer identifies the collector through `status("collector")`, never through the `Popen` pid: a venv's `pythonw.exe` is a launcher, and the real collector is its child process with a different pid.
 - `te --no-collector` skips the spawn, for `--at` and `--demo` sessions. `--at` and `--demo` imply it.
 - The footer gains one line: collector alive since `HH:MM`, or not running. Text from the pack, colour from the theme.
 

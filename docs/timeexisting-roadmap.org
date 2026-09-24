@@ -74,7 +74,7 @@ The dashboard is not open all day. The collector must survive the terminal closi
 
 ** Collector lifecycle
 
-- Lockfile at =state/collector.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
+- Lockfile at =state/collector-{host}.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
 - The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json= with the current UTC timestamp and the collector's PID: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint.
 - Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick.
 - Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= after a suspend.
@@ -165,13 +165,19 @@ Weekends and the day flags that replace the day (=sick=, =offsite=, =afspadserin
 
 Resolved through =platformdirs=. Never the repository, never a cloud-synced path by default. =TIMEEXISTING_CONFIG_DIR= and =TIMEEXISTING_STATE_DIR= override the two roots when set, for a user who syncs one config and one ledger across machines by their own means. Directories are created on first use, never at import.
 
+Every per-machine file in the state directory carries the host in its name, so machines sharing a synced state directory never contend for one file.
+
 | Artifact | Windows | Linux |
 |---|---|---|
 | Config | =%APPDATA%\timeexisting\= | =~/.config/timeexisting/= |
 | Ledger and state | =%LOCALAPPDATA%\timeexisting\= | =~/.local/state/timeexisting/= |
-| Diagnostic log | =...\logs\{role}.log= | =.../logs/{role}.log= |
+| Ledger shard | =...\ledger\{host}.jsonl= | =.../ledger/{host}.jsonl= |
+| Lockfile | =...\{role}-{host}.lock= | =.../{role}-{host}.lock= |
+| Checkpoint | =...\checkpoint-{host}.json= | =.../checkpoint-{host}.json= |
+| Stop file | =...\collector-{host}.stop= | =.../collector-{host}.stop= |
+| Diagnostic log | =...\logs\{role}-{host}.log= | =.../logs/{role}-{host}.log= |
 
-The diagnostic log is one =RotatingFileHandler= per role, =collector.log= and =viewer.log=, each 1 MB with 3 backups, never stdout or stderr. One file per role because the collector and the viewer run at the same time, and Windows cannot rename a file another process holds open: a shared file would fail every rollover and drop records until the other process closed it. A failed emit drops the record silently (=logging.raiseExceptions = False=) rather than printing to a terminal a =Live= display owns. The ledger is never rotated or truncated and is a different file.
+The diagnostic log is one =RotatingFileHandler= per role and host, =collector-{host}.log= and =viewer-{host}.log=, each 1 MB with 3 backups, never stdout or stderr. One file per role because the collector and the viewer run at the same time, and Windows cannot rename a file another process holds open: a shared file would fail every rollover and drop records until the other process closed it. A failed emit drops the record silently (=logging.raiseExceptions = False=) rather than printing to a terminal a =Live= display owns. The ledger is never rotated or truncated and is a different file.
 
 ** Sharding
 

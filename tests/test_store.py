@@ -2,8 +2,6 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from timeexisting import paths
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Event, EventType, Source, to_json
@@ -24,29 +22,6 @@ def _event(host: str = "laptop", minutes: int = 0, **overrides) -> Event:
 
 def test_shard_path_is_host_jsonl_under_ledger_dir():
     assert store.shard_path("EXAMPLE-HOST") == paths.ledger_dir() / "EXAMPLE-HOST.jsonl"
-
-
-@pytest.mark.parametrize(
-    ("host", "expected"),
-    [
-        ("EXAMPLE-HOST", "EXAMPLE-HOST"),
-        ("fedora.local", "fedora.local"),
-        ("my box/with:odd*chars", "my_box_with_odd_chars"),
-        ("..hidden", "hidden"),
-        ("  ", "unknown-host"),
-        ("", "unknown-host"),
-        ("con", "con_"),
-        ("NUL.home", "NUL.home_"),
-        ("Hvidovre-Ø", "Hvidovre-_"),
-    ],
-)
-def test_sanitise_host(host, expected):
-    assert store.sanitise_host(host) == expected
-
-
-def test_current_host_comes_from_platform_node(monkeypatch):
-    monkeypatch.setattr(store.platform, "node", lambda: "odd/host")
-    assert store.current_host() == "odd_host"
 
 
 def test_append_then_read():

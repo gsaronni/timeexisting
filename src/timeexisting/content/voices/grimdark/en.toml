@@ -11,6 +11,12 @@ footer = ["Tracking the inevitable passage of time... (Press Ctrl+C to escape)"]
 interrupted = ["Progress tracking interrupted. The corporate overlords are displeased, but your soul is momentarily liberated."]
 demo_tag = ["[DEMO]"]
 
+[instance]
+already_running = [
+    "An instance already endures. There is only one of you, and it is already suffering.",
+    "Another of you already keeps the vigil. Two witnesses to the same slow ending would be excessive, even here.",
+]
+
 [common]
 current_time = ["Current time: {time}"]
 

@@ -2,7 +2,7 @@
 
 `clock` and `sleep` are injected. Tick spacing and the suspend check are measured against the clock, never by counting sleeps, so a test runs hundreds of ticks instantly. Nothing here knows what day it is: the loop writes UTC timestamps, which is what makes midnight and a daylight-saving change non-events.
 
-Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), and `max_ticks`. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
+Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), `max_ticks`, and a session end or console close reported from another thread through the `Shutdown` handed to `on_start`. All of them go through that one idempotent `Shutdown`, so the first one wins and the rest do nothing. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
 """
 
 import json
@@ -42,6 +42,8 @@ class StopReason(StrEnum):
     MAX_TICKS = "max_ticks"
     UNCLEAN = "unclean"
     SUSPENDED = "suspended"
+    SESSION_END = "session_end"
+    CONSOLE_CLOSE = "console_close"
 
 
 def _write(
@@ -128,6 +130,45 @@ def recover(host: str, profile: str) -> None:
     delete_checkpoint(host)
 
 
+class Shutdown:
+    """The one way a running collector stops cleanly: write `collector_stop` with the reason (fsynced by `store.append`), delete the checkpoint and the stop file, release the lock, and set the stop event so the loop exits.
+
+    Idempotent and thread-safe. Logoff can deliver both a console control event and `WM_ENDSESSION`, on threads other than the loop's, so the first call does the work and every later call returns `False` having done nothing. The loop holds `mutex` while it writes a tick, so a shutdown never lands between a tick's ledger lines and no checkpoint is written after the shutdown deleted it.
+    """
+
+    def __init__(
+        self, clock: Clock, host: str, profile: str, lock: lockfile.Lock, stop_event: threading.Event
+    ) -> None:
+        self.mutex = threading.RLock()
+        self.reason: StopReason | None = None
+        self._clock = clock
+        self._host = host
+        self._profile = profile
+        self._lock = lock
+        self._stop_event = stop_event
+
+    def __call__(self, reason: StopReason) -> bool:
+        with self.mutex:
+            if self.reason is not None:
+                logger.info("shutdown (%s) ignored: already stopped (%s)", reason, self.reason)
+                return False
+            self.reason = reason
+            _write(
+                self._clock.now(),
+                self._host,
+                self._profile,
+                EventType.COLLECTOR_STOP,
+                reason,
+                Confidence.OBSERVED,
+            )
+            delete_checkpoint(self._host)
+            paths.stop_file().unlink(missing_ok=True)
+            lockfile.release(self._lock)
+            self._stop_event.set()
+            logger.info("collector stopped: %s", reason)
+            return True
+
+
 def run_collector(
     clock: Clock,
     sleep: Callable[[float], object],
@@ -135,23 +176,25 @@ def run_collector(
     *,
     max_ticks: int | None = None,
     stop_event: threading.Event | None = None,
+    on_start: Callable[[Shutdown], object] | None = None,
 ) -> StopReason:
-    """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, or `max_ticks` ticks have run. Returns the stop reason. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken."""
+    """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, `max_ticks` ticks have run, or another thread calls the `Shutdown`. Returns the stop reason.
+
+    `on_start` receives that `Shutdown` once `collector_start` and the first checkpoint are on disk; the Windows session watchers hook in there. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
+    """
     stop_event = stop_event or threading.Event()
     host = paths.current_host()
     profile = profile_for(host, cfg)
     lock = lockfile.acquire(ROLE)
+    shutdown = Shutdown(clock, host, profile, lock, stop_event)
     try:
         if paths.stop_file().exists():
             logger.warning("removing a stop file left over from an earlier stop request")
             paths.stop_file().unlink(missing_ok=True)
         recover(host, profile)
-        reason = _loop(clock, sleep, cfg, host, profile, max_ticks, stop_event)
-        _write(clock.now(), host, profile, EventType.COLLECTOR_STOP, reason, Confidence.OBSERVED)
-        delete_checkpoint(host)
-        paths.stop_file().unlink(missing_ok=True)
-        logger.info("collector stopped: %s", reason)
-        return reason
+        reason = _loop(clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start)
+        shutdown(reason)
+        return shutdown.reason or reason
     except Exception:
         logger.exception("collector failed; checkpoint left for recovery")
         raise
@@ -167,14 +210,20 @@ def _loop(
     profile: str,
     max_ticks: int | None,
     stop_event: threading.Event,
+    shutdown: Shutdown,
+    on_start: Callable[[Shutdown], object] | None,
 ) -> StopReason:
     tick = cfg.collector.tick
     previous = clock.now()
     _write(previous, host, profile, EventType.COLLECTOR_START, StartReason.LAUNCH, Confidence.OBSERVED)
     write_checkpoint(host, previous)
     logger.info("collector started on %s, tick %s", host, tick)
+    if on_start is not None:
+        on_start(shutdown)
     ticks = 0
     while True:
+        if shutdown.reason is not None:
+            return shutdown.reason
         if stop_event.is_set():
             return StopReason.SIGNAL
         if paths.stop_file().exists():
@@ -182,20 +231,32 @@ def _loop(
         if max_ticks is not None and ticks >= max_ticks:
             return StopReason.MAX_TICKS
         sleep(tick.total_seconds())
-        now = clock.now()
-        ticks += 1
-        if now < previous:
-            logger.warning(
-                "clock moved backwards from %s to %s; not a suspend", previous.isoformat(), now.isoformat()
-            )
-        elif now - previous > SUSPEND_FACTOR * tick:
-            logger.info("clock jumped %s since the last tick: suspended", now - previous)
-            _write(
-                previous, host, profile, EventType.COLLECTOR_STOP, StopReason.SUSPENDED, Confidence.INFERRED
-            )
-            _write(now, host, profile, EventType.COLLECTOR_START, StartReason.RESUMED, Confidence.OBSERVED)
-        write_checkpoint(host, now)
-        previous = now
+        with shutdown.mutex:
+            if shutdown.reason is not None:
+                return shutdown.reason
+            now = clock.now()
+            ticks += 1
+            if now < previous:
+                logger.warning(
+                    "clock moved backwards from %s to %s; not a suspend",
+                    previous.isoformat(),
+                    now.isoformat(),
+                )
+            elif now - previous > SUSPEND_FACTOR * tick:
+                logger.info("clock jumped %s since the last tick: suspended", now - previous)
+                _write(
+                    previous,
+                    host,
+                    profile,
+                    EventType.COLLECTOR_STOP,
+                    StopReason.SUSPENDED,
+                    Confidence.INFERRED,
+                )
+                _write(
+                    now, host, profile, EventType.COLLECTOR_START, StartReason.RESUMED, Confidence.OBSERVED
+                )
+            write_checkpoint(host, now)
+            previous = now
 
 
 def interruptible_sleep(stop_event: threading.Event) -> Callable[[float], None]:

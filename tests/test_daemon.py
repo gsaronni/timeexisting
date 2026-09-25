@@ -349,3 +349,77 @@ def test_signal_handlers_set_the_event_and_are_restored():
         signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
     assert stop_event.is_set()
     assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_shutdown_from_another_thread_ends_the_run_with_its_reason(cfg):
+    clock = _ManualClock(_T0)
+    captured: list[daemon.Shutdown] = []
+    checkpoints_after: list[bool] = []
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        if clock.sleeps == 2:
+            worker = threading.Thread(target=captured[0], args=(daemon.StopReason.SESSION_END,))
+            worker.start()
+            worker.join()
+            checkpoints_after.append(paths.checkpoint_file(_host()).exists())
+
+    reason = daemon.run_collector(clock, sleep, cfg, max_ticks=100, on_start=captured.append)
+
+    assert reason is daemon.StopReason.SESSION_END
+    assert clock.sleeps == 2
+    assert _summary() == [
+        ("collector_start", "launch", _T0, "observed"),
+        ("collector_stop", "session_end", _T0 + 2 * cfg.collector.tick, "observed"),
+    ]
+    assert checkpoints_after == [False]
+    assert not paths.checkpoint_file(_host()).exists()
+    assert lockfile.status("collector") is None
+
+
+def test_on_start_runs_after_the_start_and_first_checkpoint(cfg):
+    seen: list[tuple[int, bool]] = []
+
+    def on_start(_shutdown: daemon.Shutdown) -> None:
+        seen.append((len(_ledger()), paths.checkpoint_file(_host()).exists()))
+
+    _run(cfg, _ManualClock(_T0), max_ticks=0, on_start=on_start)
+    assert seen == [(1, True)]
+
+
+def test_shutdown_is_idempotent(cfg):
+    clock = _ManualClock(_T0)
+    results: list[bool] = []
+
+    def on_start(shutdown: daemon.Shutdown) -> None:
+        results.append(shutdown(daemon.StopReason.SESSION_END))
+        results.append(shutdown(daemon.StopReason.CONSOLE_CLOSE))
+
+    reason = _run(cfg, clock, max_ticks=5, on_start=on_start)
+
+    assert results == [True, False]
+    assert reason is daemon.StopReason.SESSION_END
+    assert clock.sleeps == 0
+    assert [reason for _, reason, _, _ in _summary()] == ["launch", "session_end"]
+
+
+def test_concurrent_shutdowns_write_one_stop(cfg):
+    results: list[bool] = []
+
+    def on_start(shutdown: daemon.Shutdown) -> None:
+        barrier = threading.Barrier(8)
+
+        def call() -> None:
+            barrier.wait()
+            results.append(shutdown(daemon.StopReason.SESSION_END))
+
+        workers = [threading.Thread(target=call) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+    _run(cfg, _ManualClock(_T0), max_ticks=5, on_start=on_start)
+
+    assert sorted(results) == [False] * 7 + [True]
+    assert [reason for _, reason, _, _ in _summary()] == ["launch", "session_end"]

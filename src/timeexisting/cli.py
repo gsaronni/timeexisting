@@ -263,12 +263,24 @@ def _run_config_command(command: str) -> None:
 _STOP_POLL_SECONDS = 0.25
 
 
+def _session_watch() -> Callable[[daemon.Shutdown], object] | None:
+    if sys.platform != "win32":
+        return None
+    from timeexisting.collector import session_win32
+
+    return session_win32.install
+
+
 def _collect_run(cfg: Config) -> None:
     stop_event = threading.Event()
     try:
         with daemon.signal_handlers(stop_event):
             daemon.run_collector(
-                SystemClock(), daemon.interruptible_sleep(stop_event), cfg, stop_event=stop_event
+                SystemClock(),
+                daemon.interruptible_sleep(stop_event),
+                cfg,
+                stop_event=stop_event,
+                on_start=_session_watch(),
             )
     except (lockfile.AlreadyRunning, lockfile.LockError) as error:
         logger.warning("collector refused to start: %s", error)

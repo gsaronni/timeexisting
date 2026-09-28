@@ -28,6 +28,14 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-09-28, phase 2 (in progress): persistence
+
+Full entry to follow as the phase's final step.
+
+*Carried over:*
+- Step 7 first live test failed on a real restart: the collector's last checkpoint was at 09:24:46, and there was no =session_end= stop and no log line for =WM_QUERYENDSESSION= or =WM_ENDSESSION=. A message-only window (=HWND_MESSAGE= parent) does not receive broadcast messages, so it never heard the session-end messages. It is replaced with a hidden top-level window (=WS_EX_TOOLWINDOW=, never shown), and both messages are now logged at INFO with =wParam= and =lParam=. Live re-test pending.
+- A Modern Standby dark wake on 26 September at 07:50 local was recorded as a zero-length presence interval by the suspend rule. Harmless at zero length, but phase 3 should credit presence on user evidence such as unlock or input rather than on collector liveness alone.
+
 ** 2026-09-22, phase 1: schedule model, configuration, resolver, panels
 
 *Asked:* execute =docs/phase-1-prompt.md= one step at a time, stopping for review after each: replace the legacy 09:00-18:00 schedule with the real section 4 model, add configuration loading, add day flags, fix the demo so it is a carousel of states, then rewire the panels onto the new schedule and resolver.

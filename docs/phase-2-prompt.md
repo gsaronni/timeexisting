@@ -12,7 +12,7 @@ Work in small, reviewable steps. After each step run `ruff format .`, `ruff chec
 
 ## Two corrections to the roadmap, apply them to the spec as well
 
-1. **Section 3 says a console control handler catches logoff.** Under `pythonw.exe` there is no console, so `SetConsoleCtrlHandler` never fires. The detached collector needs a hidden message-only window receiving `WM_QUERYENDSESSION` and `WM_ENDSESSION`. Keep the console handler for when `te collect` runs in a terminal. Rewrite the collector lifecycle bullets in section 3 to say this.
+1. **Section 3 says a console control handler catches logoff.** Under `pythonw.exe` there is no console, so `SetConsoleCtrlHandler` never fires. The detached collector needs a hidden top-level window receiving `WM_QUERYENDSESSION` and `WM_ENDSESSION` (not a message-only window, which does not receive them; see step 7). Keep the console handler for when `te collect` runs in a terminal. Rewrite the collector lifecycle bullets in section 3 to say this.
 2. **Section 5's event schema has no id**, but the phase 7 editor supersedes events by id. Add an `id` field, generated with `uuid.uuid7()` (Python 3.14, time-ordered), as a lowercase hex string. Update the schema table and the JSON example in section 5.
 
 ## Step 0: housekeeping
@@ -97,7 +97,7 @@ Then `ledger/replay.py`:
 `collector/session_win32.py`, imported only on Windows:
 
 - When a console is attached, register a handler via `SetConsoleCtrlHandler` for `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT`.
-- Always, start a daemon thread that creates a message-only window with `pywin32` (`win32gui.CreateWindowEx` with `HWND_MESSAGE` as parent) and handles `WM_QUERYENDSESSION` (return `True`) and `WM_ENDSESSION` (when `wParam` is true, write `collector_stop` with reason `session_end`, fsync, delete the checkpoint, release the lock). Session end is a clean stop; a checkpoint left behind here would make the next login write a spurious `unclean` stop.
+- Always, start a daemon thread that creates a hidden top-level window with `pywin32`: a registered window class, `win32gui.CreateWindowEx` with no parent, no `WS_VISIBLE`, never shown, and `WS_EX_TOOLWINDOW` so it has no taskbar entry. Not a message-only window (`HWND_MESSAGE` parent): those cannot be enumerated and do not receive broadcast messages, and the session-end messages go to the session's top-level windows, so a message-only window never hears them. The first version used one and missed a real restart. The window handles `WM_QUERYENDSESSION` (return `True`) and `WM_ENDSESSION` (when `wParam` is true, write `collector_stop` with reason `session_end`, fsync, delete the checkpoint, release the lock). Log both at INFO with `wParam` and `lParam` on arrival. Session end is a clean stop; a checkpoint left behind here would make the next login write a spurious `unclean` stop.
 - Both paths call one shutdown function that is idempotent, since logoff can deliver both.
 - Unit-test the shutdown function directly and the window procedure by calling it with synthetic messages. Live verification is manual and is listed under "Done when". Tell me if `pywin32` cannot create the window under `pythonw`; this is the step most likely to need a second approach.
 

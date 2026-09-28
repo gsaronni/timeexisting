@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -92,19 +93,74 @@ def test_a_failing_shutdown_is_logged_not_raised(caplog):
     assert "shutdown on session_end failed" in caplog.text
 
 
-def test_the_real_window_is_message_only_and_receives_session_messages(watcher, recording):
+def test_both_session_messages_are_logged_with_their_parameters(watcher, caplog):
+    caplog.set_level("INFO", logger=session_win32.__name__)
+    watcher.window_procedure(0, win32con.WM_QUERYENDSESSION, 0, 0x80000000)
+    watcher.window_procedure(0, win32con.WM_ENDSESSION, 0, 0x1)
+    assert "WM_QUERYENDSESSION received: wParam 0x0, lParam 0x80000000" in caplog.text
+    assert "WM_ENDSESSION received: wParam 0x0, lParam 0x1" in caplog.text
+
+
+def test_end_session_is_logged_before_a_failing_stop(caplog):
+    caplog.set_level("INFO", logger=session_win32.__name__)
+    failing = session_win32.SessionWatcher(_RecordingShutdown(fail=True))
+    failing.window_procedure(0, win32con.WM_ENDSESSION, 1, 0)
+    received = caplog.text.index("WM_ENDSESSION received: wParam 0x1, lParam 0x0")
+    assert received < caplog.text.index("shutdown on session_end failed")
+
+
+def _find_top_level(pid: int) -> int:
+    return win32gui.FindWindow(session_win32.WINDOW_CLASS, session_win32.window_title(pid))
+
+
+def test_the_real_window_is_hidden_top_level_and_receives_session_messages(watcher, recording):
     assert watcher.start()
     try:
-        found = win32gui.FindWindowEx(
-            win32con.HWND_MESSAGE, 0, session_win32.WINDOW_CLASS, session_win32.window_title(os.getpid())
+        assert _find_top_level(os.getpid()) == watcher.hwnd
+        assert (
+            win32gui.FindWindowEx(
+                win32con.HWND_MESSAGE, 0, session_win32.WINDOW_CLASS, session_win32.window_title(os.getpid())
+            )
+            == 0
         )
-        assert found == watcher.hwnd
+        assert win32gui.GetParent(watcher.hwnd) == 0
+        assert not win32gui.IsWindowVisible(watcher.hwnd)
+        assert win32gui.GetWindowLong(watcher.hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW
+        assert not win32gui.GetWindowLong(watcher.hwnd, win32con.GWL_STYLE) & win32con.WS_VISIBLE
         assert win32gui.SendMessage(watcher.hwnd, win32con.WM_QUERYENDSESSION, 0, 0) == 1
         win32gui.SendMessage(watcher.hwnd, win32con.WM_ENDSESSION, 1, 0)
         assert recording.calls == [StopReason.SESSION_END]
     finally:
         watcher.close()
     assert not watcher._thread.is_alive()
+
+
+class _ProbeWatcher(session_win32.SessionWatcher):
+    """Records a private registered message, which no other window on the machine acts on."""
+
+    def __init__(self, shutdown, probe: int) -> None:
+        super().__init__(shutdown)
+        self.probe = probe
+        self.probed = threading.Event()
+
+    def window_procedure(self, hwnd, message, wparam, lparam):
+        if message == self.probe:
+            self.probed.set()
+            return 0
+        return super().window_procedure(hwnd, message, wparam, lparam)
+
+
+def test_the_real_window_receives_broadcast_messages(recording):
+    """The property the message-only window lacked. A broadcast of a private message stands in for session end, which cannot be broadcast from a test without ending other applications."""
+    probe = win32gui.RegisterWindowMessage(f"timeexisting-broadcast-probe-{os.getpid()}")
+    watcher = _ProbeWatcher(recording, probe)
+    assert watcher.start()
+    try:
+        win32gui.PostMessage(win32con.HWND_BROADCAST, probe, 0, 0)
+        assert watcher.probed.wait(5.0)
+    finally:
+        watcher.close()
+    assert recording.calls == []
 
 
 def _wait_for(condition, timeout: float = 15.0):
@@ -124,11 +180,7 @@ def test_a_pythonw_collector_stops_cleanly_on_end_session():
     process = subprocess.Popen([str(pythonw), "-m", "timeexisting", "collect"])
     try:
         owner = _wait_for(lambda: lockfile.status("collector"))
-        hwnd = _wait_for(
-            lambda: win32gui.FindWindowEx(
-                win32con.HWND_MESSAGE, 0, session_win32.WINDOW_CLASS, session_win32.window_title(owner.pid)
-            )
-        )
+        hwnd = _wait_for(lambda: _find_top_level(owner.pid))
 
         assert win32gui.SendMessage(hwnd, win32con.WM_QUERYENDSESSION, 0, 0) == 1
         win32gui.SendMessage(hwnd, win32con.WM_ENDSESSION, 1, 0)

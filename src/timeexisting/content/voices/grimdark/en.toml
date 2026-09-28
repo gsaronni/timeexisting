@@ -11,6 +11,11 @@ footer = ["Tracking the inevitable passage of time... (Press Ctrl+C to escape)"]
 interrupted = ["Progress tracking interrupted. The corporate overlords are displeased, but your soul is momentarily liberated."]
 demo_tag = ["[DEMO]"]
 
+[app.collector]
+alive = ["The collector has kept its vigil since {since}."]
+absent = ["No collector watches. These hours go unrecorded."]
+spawn_failed = ["A collector was summoned and did not answer. These hours go unrecorded."]
+
 [instance]
 already_running = [
     "An instance already endures. There is only one of you, and it is already suffering.",

@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from timeexisting import logging_setup, paths
+from timeexisting.collector import spawn
 from timeexisting.config.loader import load_config
 
 
@@ -14,6 +15,16 @@ def _isolated_paths(tmp_path, monkeypatch):
     """
     monkeypatch.setenv(paths.CONFIG_DIR_ENV, str(tmp_path / "config"))
     monkeypatch.setenv(paths.STATE_DIR_ENV, str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_collector(monkeypatch):
+    """No test starts a real detached collector. A test that exercises spawning passes its own `spawner` or `popen`."""
+
+    def refuse(*_args, **_kwargs):
+        pytest.fail("a test tried to spawn a real collector")
+
+    monkeypatch.setattr(spawn, "spawn", refuse)
 
 
 @pytest.fixture(autouse=True)

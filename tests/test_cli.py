@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, time
 import pytest
 
 from timeexisting import cli, paths
-from timeexisting.collector import lockfile
+from timeexisting.collector import lockfile, spawn
 from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.schedule import DayFlag
@@ -286,3 +286,34 @@ def test_collect_stop_gives_up_after_two_poll_intervals(capsys, cfg):
 
 def _pool(key: str) -> set[str]:
     return set(phrases._pool(phrases.DEFAULT_VOICE, phrases.DEFAULT_LOCALE, key))
+
+
+def test_no_collector_parses_and_defaults_off():
+    parser = cli.build_parser()
+    assert parser.parse_args([]).no_collector is False
+    assert parser.parse_args(["--no-collector"]).no_collector is True
+
+
+@pytest.mark.parametrize("argv", [["--no-collector"], ["--at", "2026-09-17 07:30"], ["--demo"]])
+def test_start_collector_is_skipped_when_opted_out(argv, monkeypatch):
+    monkeypatch.setattr(spawn, "ensure_running", lambda: pytest.fail("must not start a collector"))
+    assert cli._start_collector(cli.build_parser().parse_args(argv)) is False
+
+
+def test_start_collector_reports_a_spawn_that_never_took_the_lock(monkeypatch):
+    monkeypatch.setattr(spawn, "ensure_running", lambda: None)
+    assert cli._start_collector(cli.build_parser().parse_args([])) is True
+
+
+def test_start_collector_reports_success_when_a_collector_runs(monkeypatch):
+    lock = lockfile.acquire("collector")
+    monkeypatch.setattr(spawn, "ensure_running", lambda: lock.status)
+    assert cli._start_collector(cli.build_parser().parse_args([])) is False
+
+
+def test_collector_since_follows_the_lock():
+    assert cli._collector_since() is None
+    lock = lockfile.acquire("collector")
+    assert cli._collector_since() == lock.status.started
+    lockfile.release(lock)
+    assert cli._collector_since() is None

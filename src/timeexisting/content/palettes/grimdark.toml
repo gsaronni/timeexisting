@@ -17,6 +17,8 @@ countdown_emphasis = "bold yellow"
 post_work_message  = "italic green"
 next_break         = "dim cyan"
 danger             = "bold red"
+collector_alive    = "dim green"
+collector_absent   = "dim red"
 
 [season]
 Winter = "blue"

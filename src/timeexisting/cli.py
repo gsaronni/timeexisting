@@ -11,7 +11,7 @@ from datetime import UTC, datetime, time, timedelta
 from importlib.resources import files
 
 from timeexisting import logging_setup, paths
-from timeexisting.collector import daemon, lockfile
+from timeexisting.collector import daemon, lockfile, spawn
 from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
@@ -141,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo",
         action="store_true",
         help="Cycle through a carousel of fixed states: every phase and every month.",
+    )
+    parser.add_argument(
+        "--no-collector",
+        action="store_true",
+        help="Do not start a collector if none is running. Implied by --at and --demo.",
     )
     parser.add_argument(
         "--start",
@@ -323,6 +328,18 @@ def _run_collect_command(command: str | None, cfg: Config) -> None:
         _collect_stop(cfg)
 
 
+def _collector_since() -> datetime | None:
+    owner = lockfile.status(daemon.ROLE)
+    return None if owner is None else owner.started
+
+
+def _start_collector(args: argparse.Namespace) -> bool:
+    """Make sure a collector runs before the Rich surface exists, unless this session opted out. Returns true when one was spawned and never took its lock."""
+    if args.no_collector or args.at is not None or args.demo:
+        return False
+    return spawn.ensure_running() is None
+
+
 def _load_config_or_exit() -> Config:
     try:
         return loader.load_config()
@@ -348,6 +365,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_collect_command(args.collect_command, cfg)
         return
 
+    spawn_failed = _start_collector(args)
+
     if args.demo:
         run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
         return
@@ -355,4 +374,4 @@ def main(argv: list[str] | None = None) -> None:
     start = _resolve_start(args, cfg, _viewer_now(args))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
-    run(clock, cfg, start, flags, label=label)
+    run(clock, cfg, start, flags, label=label, collector_since=_collector_since, spawn_failed=spawn_failed)

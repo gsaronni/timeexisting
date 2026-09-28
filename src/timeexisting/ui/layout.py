@@ -21,7 +21,7 @@ def build_layout(theme: Theme) -> Layout:
     layout.split_column(
         Layout(name="header", size=header_size),
         Layout(name="main", ratio=1),
-        Layout(name="footer", size=1),
+        Layout(name="footer", size=2),
     )
     layout["main"].split_row(
         Layout(name="left", ratio=1),

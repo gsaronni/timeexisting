@@ -17,7 +17,7 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 |---|---|---|---|
 | 0 | complete | =phase-0= | prompt at =docs/phase-0-prompt.md= |
 | 1 | complete | =phase-1= | prompt at =docs/phase-1-prompt.md= |
-| 2 | | | |
+| 2 | complete | =phase-2= | prompt at =docs/phase-2-prompt.md= |
 | 3 | | | |
 | 4 | | | |
 | 5 | | | |
@@ -28,14 +28,38 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
-** 2026-09-28, phase 2 (in progress): persistence
+** 2026-09-23 to 2026-09-29, phase 2: persistence
 
-Full entry to follow as the phase's final step.
+*Asked:* execute =docs/phase-2-prompt.md= one step at a time, stopping for review after each: the headless collector, the append-only ledger and its replay, the single-instance lockfile, diagnostic logging, clean stop on Windows session end, the viewer spawning the collector, and the Startup shortcut. The collector records its own presence only. No lock or OS sleep detection, no absence classification, no balances: those are phases 3 and 4.
+
+*Done:*
+- Steps 0-1: pre-commit hook renamed to =ruff-check=; the two spec corrections applied to the roadmap (session end needs a window under =pythonw.exe=, events carry a =uuid7= =id=); =TIMEEXISTING_CONFIG_DIR= and =TIMEEXISTING_STATE_DIR= overrides, with test isolation done through them so subprocesses inherit it; diagnostic logging never to stdout or stderr.
+- Step 2: =ledger/events.py=, the event schema with a strict JSON round trip in fixed key order, naive timestamps and unknown versions rejected, and host-to-profile resolution.
+- Step 3: =ledger/store.py=, one shard per host, =O_APPEND= plus =fsync= per event, malformed lines skipped and counted. A torn last line (a crash mid-write) gets a newline in front of the next event, so it stays one malformed line instead of swallowing that event.
+- Step 4: heartbeat vocabulary retired (=Source.COLLECTOR=, config key =collector.tick=); =ledger/replay.py= pairs =collector_start= and =collector_stop= per host into presence intervals and gaps, unclosed starts kept, not guessed. The architecture test now holds =events.py= and =replay.py= to the domain rules, including no I/O.
+- Step 5: =collector/lockfile.py=, atomic create, liveness by pid plus process create time so a recycled pid is stale, a young unreadable lock left alone for a grace period. Every per-machine state file carries the host in its name.
+- Step 6: =collector/daemon.py=, the tick loop with an atomically replaced checkpoint, recovery of a leftover checkpoint as an inferred =unclean= stop (skipped when the ledger already holds a later clean stop), clock-jump suspend inference, stop file and signal exits; =te collect status= and =te collect stop=.
+- Step 7: =collector/session_win32.py=, a console control handler when a console is attached and always a hidden window on a daemon thread, both calling one idempotent shutdown. Reworked after the first live test; see Observed.
+- Step 8: =collector/spawn.py=; =te= spawns a detached collector when none holds the lock and waits up to three seconds for it, identifying it only through the lock. =--no-collector=, implied by =--at= and =--demo=. The footer's second line reports the collector each tick. A test guard stops any test from spawning a real collector.
+- Step 9: =scripts/install-startup.ps1=, PowerShell 7 only, with =-Uninstall= and =-WhatIf=, refusing without the venv or =pythonw.exe=. Tested by running the real script under =pwsh= against a temporary Startup folder via an added =-StartupFolder= parameter.
+- The step 10 test list was delivered inside each step rather than as a separate step. 436 tests at the end of the phase, =ruff format --check .= and =ruff check .= clean.
+
+*Rejected:*
+- A heartbeat ledger line every tick, the prompt's original design. Replaced mid-phase (=1ccdfeb=) by a transition-only ledger: ticks overwrite a per-host checkpoint file, and the ledger only sees starts and stops.
+- One shared =tracker.log=. Windows cannot rename a file another process holds open, so with the collector and viewer running together every rollover would fail. One log per role and host instead.
+- A message-only window for session end; see Observed.
+- Nothing pulled forward from phases 3 and 4.
+
+*Observed:*
+- Step 7 failed its first live test. On a real restart on 28 September at 09:25 the collector's last checkpoint was at 09:24:46, with no =session_end= stop and no log line for =WM_QUERYENDSESSION= or =WM_ENDSESSION=. A message-only window (=HWND_MESSAGE= parent) cannot be enumerated and does not receive broadcast messages, so the session-end messages never reached it. The step 7 tests had sent the messages straight to the window's handle, which proved the window procedure, not delivery. Reworked (=d71cb84=) to a hidden top-level window: registered class, no parent, never shown, =WS_EX_TOOLWINDOW=, with both messages logged at INFO with =wParam= and =lParam= on arrival, and a test that a broadcast message reaches the real window. The re-test on a real restart passed: both messages logged, =collector_stop= with reason =session_end= written, and the Startup shortcut launched the collector at the next login.
+- A Modern Standby dark wake on 26 September at 07:50 local was recorded as a zero-length presence interval by the suspend rule. Harmless at zero length, but the collector being alive is not evidence that the user was present.
+- The pre-commit =end-of-file-fixer= appended newlines to the ASCII art. The art was restored byte-exact (=9b5c1da=) and excluded from the text hooks.
+- A venv's =pythonw.exe= is a launcher; the collector runs as its child under the base interpreter with a different pid, which is why the viewer finds the collector through the lock and never through the =Popen= pid.
 
 *Carried over:*
-- Step 7 first live test failed on a real restart: the collector's last checkpoint was at 09:24:46, and there was no =session_end= stop and no log line for =WM_QUERYENDSESSION= or =WM_ENDSESSION=. A message-only window (=HWND_MESSAGE= parent) does not receive broadcast messages, so it never heard the session-end messages. It is replaced with a hidden top-level window (=WS_EX_TOOLWINDOW=, never shown), and both messages are now logged at INFO with =wParam= and =lParam=. Live re-test pending.
-- A Modern Standby dark wake on 26 September at 07:50 local was recorded as a zero-length presence interval by the suspend rule. Harmless at zero length, but phase 3 should credit presence on user evidence such as unlock or input rather than on collector liveness alone.
+- Phase 3 should credit presence on user evidence such as unlock or input rather than on collector liveness alone (the dark-wake finding above).
 - The weekday commentary hardcodes calendar hours: Monday says "96 hours of corporate servitude remain", which is 4 × 24, not the contract. Replace every hardcoded figure in the weekday pack lines with a ={remaining_week}= template variable, computed from the schedule as today's remaining window plus the daily target times the remaining working days in the ISO week, excluding holidays and flagged days. Phase 4 later swaps the planned figure for weekly target minus credited time. To be fixed as the first commit after the =phase-2= tag, not in phase 2.
+- Phase 3 (sleep and lock detection, event log, recovery) is next, per =docs/timeexisting-roadmap.org= section 16.
 
 ** 2026-09-22, phase 1: schedule model, configuration, resolver, panels
 

@@ -18,6 +18,8 @@ from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock, FixedClock, SystemClock
 from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
+from timeexisting.ledger import store
+from timeexisting.ledger.replay import Timeline, replay
 from timeexisting.ui.app import local_timezone, run, run_demo
 
 logger = logging.getLogger(__name__)
@@ -200,8 +202,37 @@ def _in_night_window(moment: time, cfg: Config) -> bool:
     return moment >= night_start or moment < night_end  # wraps midnight, e.g. 22:00-06:00
 
 
-def _prompt_start(cfg: Config, *, read=input, write=print) -> time:
-    default = cfg.credit.default_start
+def _first_presence_today(timeline: Timeline, host: str, now: datetime) -> time | None:
+    """The local start, to the minute, of `host`'s first presence interval that begins on `now`'s local day and no later than `now`. An interval carried over from the previous day does not count: its start is not today's. Pure; `now` carries the local zone."""
+    starts = [
+        local
+        for presence in timeline.presences
+        if presence.host == host
+        and (local := presence.start.astimezone(now.tzinfo)).date() == now.date()
+        and local <= now
+    ]
+    if not starts:
+        return None
+    return min(starts).time().replace(second=0, microsecond=0)
+
+
+def _ledger_start(now: datetime) -> time | None:
+    """This host's first presence today, from its own shard, as a suggestion for the start prompt. A ledger that cannot be read suggests nothing rather than failing the prompt."""
+    host = paths.current_host()
+    try:
+        result = store.read_shard(store.shard_path(host))
+    except OSError:
+        logger.exception("could not read the ledger for a start suggestion")
+        return None
+    suggested = _first_presence_today(replay(result.events), host, now)
+    logger.info("start suggestion from the ledger: %s", suggested)
+    return suggested
+
+
+def _prompt_start(cfg: Config, *, default: time | None = None, read=input, write=print) -> time:
+    """Ask for the day's start. `default`, shown in brackets and taken on an empty answer, falls back to `credit.default_start`."""
+    if default is None:
+        default = cfg.credit.default_start
     while True:
         raw = read(f"Start time [{default:%H:%M}]: ").strip()
         if not raw:
@@ -217,21 +248,35 @@ def _warn_outside_flex_band(
 ) -> None:
     if not (cfg.contract.flex_start <= start <= cfg.contract.flex_end):
         write(
-            f"Warning: start {start:%H:%M} is outside the flex band "
-            f"{cfg.contract.flex_start:%H:%M}-{cfg.contract.flex_end:%H:%M}."
+            pick("start.outside_flex").format(
+                start=f"{start:%H:%M}",
+                flex_start=f"{cfg.contract.flex_start:%H:%M}",
+                flex_end=f"{cfg.contract.flex_end:%H:%M}",
+            )
         )
 
 
-def _resolve_start(args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print) -> time:
+def _resolve_start(
+    args: argparse.Namespace,
+    cfg: Config,
+    now: datetime,
+    *,
+    read=input,
+    write=print,
+    suggest: Callable[[datetime], time | None] | None = None,
+) -> time:
+    """`suggest` supplies today's start from the evidence, and defaults to the ledger. It is the prompt's default, and in the night window or after `credit.latest`, where asking is pointless, it is used silently; `credit.default_start` applies only when it has nothing. Weekends and `--start` never consult it."""
     if args.start is not None:
         start = args.start
     elif now.date().weekday() >= 5:
         start = cfg.credit.default_start
     elif _in_night_window(now.time(), cfg) or now.time() > cfg.credit.latest:
-        # Nothing reasonable to ask at this hour: use the default silently.
-        start = cfg.credit.default_start
+        # Nothing reasonable to ask at this hour, but the ledger is still better evidence than the config default.
+        suggested = (suggest or _ledger_start)(now)
+        start = cfg.credit.default_start if suggested is None else suggested
     else:
-        start = _prompt_start(cfg, read=read, write=write)
+        suggested = (suggest or _ledger_start)(now)
+        start = _prompt_start(cfg, default=suggested, read=read, write=write)
     _warn_outside_flex_band(start, cfg)
     return start
 

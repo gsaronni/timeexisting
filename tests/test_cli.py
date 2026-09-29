@@ -7,6 +7,9 @@ from timeexisting.collector import lockfile, spawn
 from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.schedule import DayFlag
+from timeexisting.ledger import store
+from timeexisting.ledger.events import Event, EventType, Source
+from timeexisting.ledger.replay import replay
 
 
 def test_no_arguments_yields_a_system_clock():
@@ -163,9 +166,12 @@ def test_warn_outside_flex_band_fires_only_outside_the_band(cfg):
     cli._warn_outside_flex_band(time(8, 30), cfg, write=warnings.append)
     assert warnings == []
 
-    cli._warn_outside_flex_band(time(7, 0), cfg, write=warnings.append)
+    cli._warn_outside_flex_band(time(9, 15), cfg, write=warnings.append)
     assert len(warnings) == 1
-    assert "flex band" in warnings[0]
+    assert warnings[0] in {
+        line.format(start="09:15", flex_start="08:00", flex_end="09:00")
+        for line in _pool("start.outside_flex")
+    }
 
 
 def _unexpected_read(_prompt):
@@ -353,3 +359,147 @@ def test_main_exits_130_without_a_traceback_on_ctrl_c_at_the_prompt(capsys, monk
     captured = capsys.readouterr()
     assert captured.out.strip() in _pool("start.interrupted")
     assert "Traceback" not in captured.err
+
+
+def _presence_event(ts: datetime, kind: str, host: str | None = None, reason: str = "launch"):
+    return Event.new(
+        ts=ts,
+        host=host or paths.current_host(),
+        profile="work",
+        event=EventType(kind),
+        source=Source.COLLECTOR,
+        data={"reason": reason},
+    )
+
+
+def _utc(day: int, hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime(2026, 9, day, hour, minute, second, tzinfo=UTC)
+
+
+_TUESDAY_10_LOCAL = datetime(2026, 9, 29, 10, 0, tzinfo=cli.local_timezone())
+
+
+def test_first_presence_today_is_the_earliest_start_of_the_local_day_to_the_minute():
+    host = paths.current_host()
+    timeline = replay(
+        [
+            _presence_event(_utc(29, 6, 5, 42), "collector_start"),  # 08:05:42 local
+            _presence_event(_utc(29, 6, 40), "collector_stop"),
+            _presence_event(_utc(29, 7, 15), "collector_start", reason="resumed"),
+        ]
+    )
+    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) == time(8, 5)
+
+
+def test_first_presence_today_uses_the_local_day_not_the_utc_day():
+    host = paths.current_host()
+    # 22:30 UTC on the 28th is 00:30 on the 29th in Copenhagen.
+    timeline = replay([_presence_event(_utc(28, 22, 30), "collector_start")])
+    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) == time(0, 30)
+
+
+def test_first_presence_today_ignores_yesterday_other_hosts_and_the_future():
+    host = paths.current_host()
+    timeline = replay(
+        [
+            _presence_event(_utc(28, 20, 0), "collector_start"),  # yesterday 22:00 local, still open
+            _presence_event(_utc(29, 6, 0), "collector_start", host="elsewhere"),
+            _presence_event(_utc(29, 9, 0), "collector_start", reason="resumed"),  # 11:00 local, after now
+        ]
+    )
+    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) is None
+
+
+def test_ledger_start_reads_this_hosts_shard():
+    store.append(_presence_event(_utc(29, 6, 12), "collector_start"))
+    assert cli._ledger_start(_TUESDAY_10_LOCAL) == time(8, 12)
+
+
+def test_ledger_start_is_none_without_a_ledger():
+    assert cli._ledger_start(_TUESDAY_10_LOCAL) is None
+
+
+def test_ledger_start_survives_an_unreadable_ledger(monkeypatch):
+    def unreadable(_path):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(store, "read_shard", unreadable)
+    assert cli._ledger_start(_TUESDAY_10_LOCAL) is None
+
+
+def test_prompt_shows_and_accepts_the_suggested_default(cfg):
+    prompts: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    assert cli._prompt_start(cfg, default=time(8, 12), read=read) == time(8, 12)
+    assert prompts == ["Start time [08:12]: "]
+
+
+def test_prompt_override_beats_the_suggested_default(cfg):
+    assert cli._prompt_start(cfg, default=time(8, 12), read=lambda _: "08:40") == time(8, 40)
+
+
+def test_resolve_start_offers_the_ledger_suggestion_at_the_prompt(cfg):
+    args = cli.build_parser().parse_args([])
+    prompts: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    start = cli._resolve_start(args, cfg, _TUESDAY_10_LOCAL, read=read, suggest=lambda _now: time(8, 12))
+    assert start == time(8, 12)
+    assert prompts == ["Start time [08:12]: "]
+
+
+def test_resolve_start_falls_back_to_the_config_default_without_a_suggestion(cfg):
+    args = cli.build_parser().parse_args([])
+    prompts: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    start = cli._resolve_start(args, cfg, _TUESDAY_10_LOCAL, read=read, suggest=lambda _now: None)
+    assert start == cfg.credit.default_start
+    assert prompts == [f"Start time [{cfg.credit.default_start:%H:%M}]: "]
+
+
+def test_resolve_start_reads_no_ledger_when_it_does_not_prompt(cfg):
+    never = lambda _now: pytest.fail("must not consult the ledger")  # noqa: E731
+    given = cli.build_parser().parse_args(["--start", "08:30"])
+    assert cli._resolve_start(given, cfg, _TUESDAY_10_LOCAL, suggest=never) == time(8, 30)
+    saturday = datetime(2026, 9, 26, 10, 0, tzinfo=cli.local_timezone())
+    plain = cli.build_parser().parse_args([])
+    assert cli._resolve_start(plain, cfg, saturday, suggest=never) == cfg.credit.default_start
+
+
+@pytest.mark.parametrize("hour", [20, 23, 2])
+def test_silent_late_and_night_branches_use_the_ledger_start(cfg, hour):
+    args = cli.build_parser().parse_args([])
+    start = cli._resolve_start(args, cfg, _at(hour), read=_unexpected_read, suggest=lambda _now: time(9, 15))
+    assert start == time(9, 15)
+
+
+@pytest.mark.parametrize("hour", [20, 23, 2])
+def test_silent_late_and_night_branches_fall_back_without_a_ledger_start(cfg, hour):
+    args = cli.build_parser().parse_args([])
+    start = cli._resolve_start(args, cfg, _at(hour), read=_unexpected_read, suggest=lambda _now: None)
+    assert start == cfg.credit.default_start
+
+
+def test_silent_late_branch_reads_the_real_ledger(cfg):
+    store.append(_presence_event(_utc(14, 7, 15), "collector_start", reason="resumed"))  # 09:15 local
+    args = cli.build_parser().parse_args([])
+    assert cli._resolve_start(args, cfg, _at(20, 0), read=_unexpected_read) == time(9, 15)
+
+
+def test_flex_warning_every_line_names_the_start_and_the_band():
+    for line in _pool("start.outside_flex"):
+        text = line.format(start="09:15", flex_start="08:00", flex_end="09:00")
+        assert "09:15" in text
+        assert "08:00" in text
+        assert "09:00" in text

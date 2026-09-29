@@ -21,6 +21,10 @@ interrupted = [
     "The day was declined before it began. A rare act of resistance, and unrecorded.",
     "You fled the question of when you started. The question will be waiting tomorrow.",
 ]
+outside_flex = [
+    "You began at {start}, outside the {flex_start}-{flex_end} band. The contract noticed. The contract always notices.",
+    "{start} sits outside the {flex_start}-{flex_end} flex band. Flexibility, it turns out, has edges.",
+]
 
 [instance]
 already_running = [

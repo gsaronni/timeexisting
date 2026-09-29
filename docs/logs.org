@@ -35,6 +35,7 @@ Full entry to follow as the phase's final step.
 *Carried over:*
 - Step 7 first live test failed on a real restart: the collector's last checkpoint was at 09:24:46, and there was no =session_end= stop and no log line for =WM_QUERYENDSESSION= or =WM_ENDSESSION=. A message-only window (=HWND_MESSAGE= parent) does not receive broadcast messages, so it never heard the session-end messages. It is replaced with a hidden top-level window (=WS_EX_TOOLWINDOW=, never shown), and both messages are now logged at INFO with =wParam= and =lParam=. Live re-test pending.
 - A Modern Standby dark wake on 26 September at 07:50 local was recorded as a zero-length presence interval by the suspend rule. Harmless at zero length, but phase 3 should credit presence on user evidence such as unlock or input rather than on collector liveness alone.
+- The weekday commentary hardcodes calendar hours: Monday says "96 hours of corporate servitude remain", which is 4 × 24, not the contract. Replace every hardcoded figure in the weekday pack lines with a ={remaining_week}= template variable, computed from the schedule as today's remaining window plus the daily target times the remaining working days in the ISO week, excluding holidays and flagged days. Phase 4 later swaps the planned figure for weekly target minus credited time. To be fixed as the first commit after the =phase-2= tag, not in phase 2.
 
 ** 2026-09-22, phase 1: schedule model, configuration, resolver, panels
 

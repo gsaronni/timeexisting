@@ -21,6 +21,8 @@ pre-commit install
 te --help
 #+end_src
 
+To start the collector at every logon, run =pwsh scripts\install-startup.ps1= once (=-WhatIf= to preview, =-Uninstall= to remove).
+
 * Multiple machines
 
 The repository carries the program, not your data. Config lives in =%APPDATA%\timeexisting\= (=~/.config/timeexisting/= on Linux) and the ledger, lockfiles and diagnostic log in =%LOCALAPPDATA%\timeexisting\= (=~/.local/state/timeexisting/=), per machine.

@@ -317,3 +317,39 @@ def test_collector_since_follows_the_lock():
     assert cli._collector_since() == lock.status.started
     lockfile.release(lock)
     assert cli._collector_since() is None
+
+
+def _interrupt(_prompt: str) -> str:
+    raise KeyboardInterrupt
+
+
+def test_ctrl_c_at_the_start_prompt_exits_quietly_with_130(cfg):
+    args = cli.build_parser().parse_args([])
+    written: list[str] = []
+    monday_morning = datetime(2026, 9, 14, 7, 30, tzinfo=cli.local_timezone())
+
+    with pytest.raises(SystemExit) as raised:
+        cli._start_or_exit(args, cfg, monday_morning, read=_interrupt, write=written.append)
+
+    assert raised.value.code == 130
+    assert raised.value.__suppress_context__
+    assert written[-1] in _pool("start.interrupted")
+
+
+def test_start_or_exit_passes_a_normal_answer_through(cfg):
+    args = cli.build_parser().parse_args([])
+    monday_morning = datetime(2026, 9, 14, 7, 30, tzinfo=cli.local_timezone())
+    assert cli._start_or_exit(args, cfg, monday_morning, read=lambda _: "08:15", write=print) == time(8, 15)
+
+
+def test_main_exits_130_without_a_traceback_on_ctrl_c_at_the_prompt(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_prompt_start", lambda *_args, **_kwargs: _interrupt(""))
+    monkeypatch.setattr(cli, "run", lambda *_args, **_kwargs: pytest.fail("must not reach the viewer"))
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--at", "2026-09-14 07:30"])
+
+    assert raised.value.code == 130
+    captured = capsys.readouterr()
+    assert captured.out.strip() in _pool("start.interrupted")
+    assert "Traceback" not in captured.err

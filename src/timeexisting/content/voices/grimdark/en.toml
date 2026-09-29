@@ -16,6 +16,12 @@ alive = ["The collector has kept its vigil since {since}."]
 absent = ["No collector watches. These hours go unrecorded."]
 spawn_failed = ["A collector was summoned and did not answer. These hours go unrecorded."]
 
+[start]
+interrupted = [
+    "The day was declined before it began. A rare act of resistance, and unrecorded.",
+    "You fled the question of when you started. The question will be waiting tomorrow.",
+]
+
 [instance]
 already_running = [
     "An instance already endures. There is only one of you, and it is already suffering.",

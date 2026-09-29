@@ -236,6 +236,20 @@ def _resolve_start(args: argparse.Namespace, cfg: Config, now: datetime, *, read
     return start
 
 
+_INTERRUPTED_EXIT = 130  # 128 + SIGINT, the shell convention for Ctrl+C
+
+
+def _start_or_exit(args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print) -> time:
+    """`_resolve_start`, but Ctrl+C at the prompt exits quietly with a pack line and code 130 instead of a traceback. No Rich surface exists yet, so plain output is safe."""
+    try:
+        return _resolve_start(args, cfg, now, read=read, write=write)
+    except KeyboardInterrupt:
+        logger.info("start-time prompt interrupted")
+        write("")  # the prompt left the cursor mid-line
+        write(pick("start.interrupted"))
+        raise SystemExit(_INTERRUPTED_EXIT) from None
+
+
 def _config_path() -> None:
     print(paths.config_file())
 
@@ -371,7 +385,7 @@ def main(argv: list[str] | None = None) -> None:
         run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
         return
 
-    start = _resolve_start(args, cfg, _viewer_now(args))
+    start = _start_or_exit(args, cfg, _viewer_now(args))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
     run(clock, cfg, start, flags, label=label, collector_since=_collector_since, spawn_failed=spawn_failed)

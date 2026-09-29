@@ -77,7 +77,7 @@ Fall = ["Fall: As leaves wither and die, so too do your dreams of advancement an
 
 # Keyed to date.weekday(): Monday = 0 .. Sunday = 6.
 [weekday]
-"0" = ["Monday: As the first chains of the week shackle you to your desk, remember: only 96 hours of corporate servitude remain."]
+"0" = ["Monday: As the first chains of the week shackle you to your desk, remember: only {remaining_week} of corporate servitude remain."]
 "1" = ["Tuesday: The illusion of progress sets in as you trudge through the wasteland of meetings and deadlines."]
 "2" = ["Wednesday: Balanced on the knife-edge of the week, neither here nor there, just like your career aspirations."]
 "3" = ["Thursday: So close to freedom, yet the hours stretch like an existential void. The weekend's siren song grows louder."]

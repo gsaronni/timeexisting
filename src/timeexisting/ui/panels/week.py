@@ -3,7 +3,12 @@
 Computed from the schedule, not the calendar: completed working days times
 the daily target, plus today's scheduled elapsed working time (already
 resolved), over the weekly target. Monday at 10:00 is no longer 0.0%.
+
+Weekday comments may carry `{remaining_week}`, the planned working time left
+in the ISO week from `domain/week.py`, formatted here as `33h18m`.
 """
+
+from datetime import timedelta
 
 from rich import box
 from rich.panel import Panel
@@ -14,10 +19,8 @@ from timeexisting.config.models import Config
 from timeexisting.content.phrases import pick
 from timeexisting.domain.resolver import Resolved
 from timeexisting.domain.segments import Phase
+from timeexisting.domain.week import remaining_week, working_weekdays
 from timeexisting.ui.theme import Theme
-
-# Index-aligned with `date.weekday()`: Monday = 0 .. Sunday = 6.
-_WEEKDAY_ABBREVIATIONS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def _is_off_day(resolved: Resolved) -> bool:
@@ -25,8 +28,13 @@ def _is_off_day(resolved: Resolved) -> bool:
     return len(segments) == 1 and segments[0].phase is Phase.OFF_DAY
 
 
+def _hours_minutes(span: timedelta) -> str:
+    hours, minutes = divmod(int(span.total_seconds()) // 60, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
 def _week_progress(resolved: Resolved, cfg: Config) -> float:
-    working_indices = {_WEEKDAY_ABBREVIATIONS.index(day) for day in cfg.contract.working_days}
+    working_indices = working_weekdays(cfg)
     today_index = resolved.plan.day.weekday()
     completed_days = sum(1 for index in working_indices if index < today_index)
 
@@ -41,7 +49,7 @@ def render(resolved: Resolved, cfg: Config, theme: Theme) -> Panel:
     weekday = day.weekday()
     weekday_name = day.strftime("%A")
     color = theme.weekday.get(weekday, theme.muted)
-    comment = pick(f"weekday.{weekday}")
+    comment = pick(f"weekday.{weekday}").format(remaining_week=_hours_minutes(remaining_week(resolved, cfg)))
 
     table = Table(box=box.ROUNDED, show_header=False, expand=True)
     table.add_column("Info", style=theme.muted)

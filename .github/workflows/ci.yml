@@ -1,5 +1,9 @@
 name: ci
-on: [push, pull_request]
+on:
+  # Branch pushes only: pushing a tag must not rerun CI against an old commit.
+  push:
+    branches: [master]
+  pull_request:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -8,10 +12,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python: ["3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev,windows]"
+      - run: ruff format --check .
       - run: ruff check .
       - run: pytest

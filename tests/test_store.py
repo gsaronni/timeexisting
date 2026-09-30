@@ -21,7 +21,7 @@ def _event(host: str = "laptop", minutes: int = 0, **overrides) -> Event:
 
 
 def test_shard_path_is_host_jsonl_under_ledger_dir():
-    assert store.shard_path("EXAMPLE-HOST") == paths.ledger_dir() / "EXAMPLE-HOST.jsonl"
+    assert store.shard_path("TEST-HOST") == paths.ledger_dir() / "TEST-HOST.jsonl"
 
 
 def test_append_then_read():

@@ -1,5 +1,6 @@
 import re
 from datetime import time, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -87,12 +88,31 @@ def test_overlay_overrides_one_value_and_leaves_the_rest(tmp_path, monkeypatch):
 def test_profiles_hosts_is_an_open_map_not_subject_to_unknown_key_checks(tmp_path, monkeypatch):
     overlay = tmp_path / "config.toml"
     overlay.write_text(
-        '[profiles.hosts]\n"EXAMPLE-HOST" = "work"\n"some-laptop" = "fun"\n',
+        '[profiles.hosts]\n"TEST-HOST" = "work"\n"some-laptop" = "fun"\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(paths, "config_file", lambda: overlay)
 
     config = loader.load_config()
 
-    assert config.profiles.hosts == {"EXAMPLE-HOST": "work", "some-laptop": "fun"}
+    assert config.profiles.hosts == {"TEST-HOST": "work", "some-laptop": "fun"}
     assert config.profiles.default == "fun"
+
+
+_EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "config.toml"
+
+
+def test_the_shipped_example_config_is_valid(monkeypatch):
+    monkeypatch.setattr(paths, "config_file", lambda: _EXAMPLE)
+    config = loader.load_config()
+    assert config.profiles.hosts == {"EXAMPLE-HOST": "work"}
+
+
+def test_the_example_configs_commented_overrides_are_valid(tmp_path, monkeypatch):
+    uncommented = re.sub(r"^# (?=\[|\w+\s*=)", "", _EXAMPLE.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    overlay = tmp_path / "config.toml"
+    overlay.write_text(uncommented, encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: overlay)
+    config = loader.load_config()
+    assert config.credit.default_start == time(8, 30)
+    assert config.contract.working_days == ("mon", "tue", "wed", "thu")

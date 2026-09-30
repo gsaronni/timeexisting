@@ -1,0 +1,46 @@
+#+TITLE: Credits
+
+* ASCII art
+
+The ASCII art in =src/timeexisting/assets/ascii_art/= is not covered by the MIT licence in =LICENSE=, which covers the code only.
+
+Most of it comes from the [[https://www.asciiart.eu][ASCII Art Archive]] (asciiart.eu). Those artworks remain the property of their artists. They are included for personal, non-commercial use under the archive's [[https://www.asciiart.eu/terms-of-use][Terms of Use]] (last updated 2 March 2026), which permit viewing, printing and sharing individual artworks for personal, non-commercial purposes, prohibit selling, sublicensing or otherwise commercialising them, and ask that artists' names or initials are never removed. Every signature is kept intact. If you reuse this program, the art does not come with it on the MIT terms: remove it or obtain permission from its artists for anything beyond personal, non-commercial use.
+
+Art generated with the archive's own tools, such as Text to ASCII Art, is free to use for any purpose without attribution under the same terms.
+
+** From the archive
+
+| File | Archive page (untitled; category shown) | Artist | Signature in the file |
+|---|---|---|---|
+| =break_afternoon.txt= | [[https://www.asciiart.eu/art/281194cbca8e7716][Drinks]] | lgbeard | LGB |
+| =break_morning.txt= | [[https://www.asciiart.eu/art/61c36b347373be89][Ice creams]] | David Hendrix | none |
+| =chess.txt= | [[https://www.asciiart.eu/art/5d7fdb7810a4e843][Chess]] | Alefith (the archive lists the artist as unknown) | By Alefith 22.02.95 |
+| =fencing.txt= | [[https://www.asciiart.eu/art/7238ad7f14c32a91][Fencing]] | Aran Kuntze | ctr |
+| =gaming.txt= | [[https://www.asciiart.eu/art/32ab92611259ee14][Game consoles]] | unknown | none |
+| =intimate.txt= | [[https://www.asciiart.eu/art/4ea282fb0de0b8ae][People]] | Joan G. Stark (Spunk) | jgs |
+| =mtb.txt= | [[https://www.asciiart.eu/art/ac65f466860c8cc7][Bicycles]] | Gilo94 (the archive lists the artist as unknown) | Gilo94' |
+| =reading.txt= | [[https://www.asciiart.eu/art/741698d25f8036b8][Books]] | unknown | none |
+| =sleep.txt= | [[https://www.asciiart.eu/art/85d6bf3fe9e69d37][Moons]] | Joan G. Stark (Spunk) | jgs |
+| =surf.txt= | [[https://www.asciiart.eu/art/6051c69669d8f265][Surfing]] | Shanaka Dias | snd |
+
+Our copies of =fencing.txt=, =mtb.txt= and =reading.txt= differ from the archive versions in some quote characters and are otherwise unchanged. The signatures in =break_afternoon.txt= and =mtb.txt= were missing from our copies and have been restored from the archive originals.
+
+** Generated with text tools
+
+| File | Origin |
+|---|---|
+| =header.txt= | "Time Existing" made with Text to ASCII Art in the Red Phoenix font, then edited by hand |
+| =shutdown.txt= | "DOOM", the exact output of the FIGlet font Fire Font-k; treated as text-tool output |
+
+Tool-generated art is free to use for any purpose, and needs no attribution.
+
+** Source not located
+
+| File | Signature in the file |
+|---|---|
+| =coffe.txt= | none |
+| =lunch.txt= | none |
+| =presleep.txt= | SSt |
+| =sunset.txt= | none |
+
+These pieces were not found on asciiart.eu. They are treated the same way as the archive's art: the property of their artists, included for personal, non-commercial use, signature intact, excluded from the MIT licence. If you are the artist of any of them and want it credited differently or removed, please open an issue.

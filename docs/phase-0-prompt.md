@@ -1,7 +1,7 @@
 # Phase 0 prompt for Claude Code
 
 Paste this as the first message in a Claude Code session opened at the repository root
-(`C:\Users\you\proj\te`), with the venv active.
+(`C:\path\to\te`), with the venv active.
 
 ---
 

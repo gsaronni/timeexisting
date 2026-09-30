@@ -1,0 +1,24 @@
+# An example user config. Copy it to the path `te config path` prints and edit it.
+#
+# A user config is an overlay on the packaged defaults
+# (src/timeexisting/config/defaults.toml): list only the keys you want to
+# change. Everything else keeps its default. Unknown keys are an error.
+# `te config check` validates the file.
+
+version = 1
+
+# Which machine counts towards the working week. Hosts not listed here get
+# `profiles.default` ("fun"), and only "work" is counted. Use the name
+# `hostname` prints on the machine.
+[profiles]
+hosts = { "EXAMPLE-HOST" = "work" }
+
+# Uncomment to change the start the prompt offers when the ledger has
+# nothing for today yet:
+# [credit]
+# default_start = 08:30:00
+
+# Uncomment for a four-day week:
+# [contract]
+# weekly_target = "29h36m"
+# working_days  = ["mon", "tue", "wed", "thu"]

@@ -18,13 +18,13 @@ def test_ledger_and_logs_live_under_state_dir():
 
 
 def test_per_machine_files_carry_the_host(monkeypatch):
-    monkeypatch.setattr(paths.platform, "node", lambda: "EXAMPLE-HOST")
-    assert paths.log_file("collector") == paths.log_dir() / "collector-EXAMPLE-HOST.log"
-    assert paths.log_file("viewer") == paths.log_dir() / "viewer-EXAMPLE-HOST.log"
-    assert paths.lock_file("collector") == paths.state_dir() / "collector-EXAMPLE-HOST.lock"
-    assert paths.lock_file("viewer") == paths.state_dir() / "viewer-EXAMPLE-HOST.lock"
-    assert paths.stop_file() == paths.state_dir() / "collector-EXAMPLE-HOST.stop"
-    assert paths.checkpoint_file("EXAMPLE-HOST") == paths.state_dir() / "checkpoint-EXAMPLE-HOST.json"
+    monkeypatch.setattr(paths.platform, "node", lambda: "TEST-HOST")
+    assert paths.log_file("collector") == paths.log_dir() / "collector-TEST-HOST.log"
+    assert paths.log_file("viewer") == paths.log_dir() / "viewer-TEST-HOST.log"
+    assert paths.lock_file("collector") == paths.state_dir() / "collector-TEST-HOST.lock"
+    assert paths.lock_file("viewer") == paths.state_dir() / "viewer-TEST-HOST.lock"
+    assert paths.stop_file() == paths.state_dir() / "collector-TEST-HOST.stop"
+    assert paths.checkpoint_file("TEST-HOST") == paths.state_dir() / "checkpoint-TEST-HOST.json"
     assert paths.checkpoint_file("odd/host").name == "checkpoint-odd_host.json"
 
 
@@ -44,7 +44,7 @@ def test_per_machine_filenames_use_the_sanitised_host(monkeypatch):
 @pytest.mark.parametrize(
     ("host", "expected"),
     [
-        ("EXAMPLE-HOST", "EXAMPLE-HOST"),
+        ("TEST-HOST", "TEST-HOST"),
         ("fedora.local", "fedora.local"),
         ("my box/with:odd*chars", "my_box_with_odd_chars"),
         ("..hidden", "hidden"),

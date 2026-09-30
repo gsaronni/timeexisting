@@ -115,7 +115,7 @@ tagged =phase-0= as part of closing this entry out.
 
 *Asked:* stand up the repository from a clean slate at =proj\te=, src layout, package =timeexisting=, CLI =te=, Python 3.14.
 
-*Done:* directory tree, =pyproject.toml= with hatchling and ruff and pytest configuration, =.gitignore= excluding the ledger, =.gitattributes= forcing LF, pre-commit hooks installed, CI workflow, =README.org=, =CLAUDE.md=, legacy script and art copied in from =ACME= commit =80dcd26=. =pip install -e ".[dev,windows]"= succeeds, =importlib.resources= finds all 16 art files, =ruff check .= clean. Roadmap, structure explanation and phase 0 prompt written to =docs/=.
+*Done:* directory tree, =pyproject.toml= with hatchling and ruff and pytest configuration, =.gitignore= excluding the ledger, =.gitattributes= forcing LF, pre-commit hooks installed, CI workflow, =README.org=, =CLAUDE.md=, legacy script and art copied in from the original private repository at commit =80dcd26=. =pip install -e ".[dev,windows]"= succeeds, =importlib.resources= finds all 16 art files, =ruff check .= clean. Roadmap, structure explanation and phase 0 prompt written to =docs/=.
 
 *Rejected:* the history-preserving extraction via =git filter-repo=; the helper script approach. Both replaced by a clean start.
 

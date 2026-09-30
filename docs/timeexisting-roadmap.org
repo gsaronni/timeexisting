@@ -6,7 +6,7 @@
 #+FILETAGS: :python:timeexisting:spec:standing:
 
 * Related
-- Repository: =C:\Users\you\proj\te=, package =timeexisting=, console script =te=.
+- Repository: =C:\path\to\te=, package =timeexisting=, console script =te=.
 - =CLAUDE.md= at the repository root points implementing agents here.
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
@@ -340,7 +340,7 @@ Sleep initiated by the user or by the idle policy needs no handling. The collect
 
 =calendar.toml=, human-owned. Base public holidays from the =holidays= package, locale =DK=, pinned recent: Store Bededag was abolished in 2024 and older releases produce a phantom April holiday.
 
-ACME additionally observes 5 June, 24 December and 31 December. These go in =[holidays.add]=.
+An employer may observe extra non-working days, for example 5 June, 24 and 31 December. These go in =[holidays.add]=.
 
 Tables: =[holidays.add]=, =[holidays.remove]=, =[ferie]=, =[sygdom]=, =[afspadsering]=, =[fri]=. Date ranges, single dates, and partial days as a date plus an hour count.
 

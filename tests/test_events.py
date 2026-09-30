@@ -22,7 +22,7 @@ _TS = datetime(2026, 9, 17, 6, 7, 31, tzinfo=UTC)
 def _event(**overrides) -> Event:
     fields = {
         "ts": _TS,
-        "host": "EXAMPLE-HOST",
+        "host": "TEST-HOST",
         "profile": "work",
         "event": EventType.UNLOCK,
         "source": Source.WIN32,
@@ -96,7 +96,7 @@ def test_round_trip_keeps_microseconds():
 def test_matches_the_spec_example_line():
     line = (
         '{"v": 1, "id": "01a0adfa34b87b2c9e41d5a6f0b3c872", "ts": "2026-09-17T06:07:31+00:00", '
-        '"host": "EXAMPLE-HOST", "profile": "work", "event": "unlock", "source": "win32", "confidence": "observed"}'
+        '"host": "TEST-HOST", "profile": "work", "event": "unlock", "source": "win32", "confidence": "observed"}'
     )
     assert to_json(from_json(line)) == line
 
@@ -227,10 +227,10 @@ def test_ids_sort_in_creation_order():
 
 
 def test_profile_for_uses_the_host_map(cfg):
-    cfg = replace(cfg, profiles=replace(cfg.profiles, default="fun", hosts={"EXAMPLE-HOST": "work"}))
-    assert profile_for("EXAMPLE-HOST", cfg) == "work"
+    cfg = replace(cfg, profiles=replace(cfg.profiles, default="fun", hosts={"TEST-HOST": "work"}))
+    assert profile_for("TEST-HOST", cfg) == "work"
 
 
 def test_profile_for_falls_back_to_default(cfg):
-    cfg = replace(cfg, profiles=replace(cfg.profiles, default="fun", hosts={"EXAMPLE-HOST": "work"}))
+    cfg = replace(cfg, profiles=replace(cfg.profiles, default="fun", hosts={"TEST-HOST": "work"}))
     assert profile_for("fedora-box", cfg) == "fun"

@@ -8,7 +8,6 @@ arithmetic and produce negative durations) with a `match` on the resolved
 `Phase`, so each branch is reachable only when the phase actually says so.
 """
 
-from rich.bar import Bar
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -18,6 +17,7 @@ from timeexisting.content.phrases import pick
 from timeexisting.domain.resolver import Resolved
 from timeexisting.domain.segments import Phase, Segment
 from timeexisting.ui.art import art_block
+from timeexisting.ui.bar import progress_bar
 from timeexisting.ui.theme import Theme
 
 _ANIMATION_FRAMES = ("|", "/", "-", "\\")
@@ -182,7 +182,7 @@ def _render_working(resolved: Resolved, theme: Theme) -> Panel:
             justify="center",
         )
     )
-    content.add_row(Bar(size=1.0, begin=0.0, end=resolved.progress, color=progress_color))
+    content.add_row(progress_bar(resolved.progress, progress_color, theme.bar_track, large=True))
     content.add_row(
         Text(
             pick("working.remaining").format(hh=hours, mm=minutes, ss=seconds),

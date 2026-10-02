@@ -19,6 +19,7 @@ next_break         = "dim cyan"
 danger             = "bold red"
 collector_alive    = "dim green"
 collector_absent   = "dim red"
+bar_track          = "grey37"
 
 [season]
 Winter = "blue"

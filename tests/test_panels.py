@@ -1,3 +1,4 @@
+import re
 import tempfile
 from datetime import UTC, date, datetime, time, timedelta
 from importlib.resources import files
@@ -12,6 +13,8 @@ from timeexisting.config import loader
 from timeexisting.content.art import ART_DIR, MANIFEST
 from timeexisting.domain.resolver import resolve
 from timeexisting.domain.schedule import DayFlag, build_day
+from timeexisting.ui.app import _update
+from timeexisting.ui.layout import build_layout
 from timeexisting.ui.panels import day, header, week, year
 from timeexisting.ui.theme import load_theme
 
@@ -50,7 +53,7 @@ _YEAR_MOMENTS = [
 
 
 def _render_to_string(renderable, width: int = 100) -> str:
-    console = Console(file=StringIO(), width=width, record=True)
+    console = Console(file=StringIO(), width=width, record=True, legacy_windows=False)
     console.print(renderable)
     return console.export_text()
 
@@ -149,3 +152,110 @@ def test_header_art_keeps_the_leading_whitespace_of_the_file(width):
         offsets.add(offset)
         assert got.lstrip() == want.lstrip()[: inner_width - (len(want) - len(want.lstrip()))].rstrip()
     assert len(offsets) == 1
+
+
+_BAR_WIDTHS = [80, 140, 200]
+_THIN_BAR = "━"
+_LARGE_BAR = "█"
+
+
+def _bar_lines(renderable, width: int) -> list[str]:
+    """Rendered rows that carry a thin bar, after checking nothing overflows."""
+    rows = _render_to_string(renderable, width=width).rstrip("\n").split("\n")
+    assert all(len(row) <= width for row in rows)
+    return [row for row in rows if _THIN_BAR in row]
+
+
+@pytest.mark.parametrize("width", _BAR_WIDTHS)
+def test_year_panel_shows_a_thin_bar_beside_each_percentage(width):
+    year_row, month_row = _bar_lines(year.render(_YEAR_MOMENTS[0], THEME), width)
+
+    assert "Year Progress" in year_row
+    assert "70.4%" in year_row
+    assert "September - 46.7%" in month_row
+    assert year_row.index(_THIN_BAR) == month_row.index(_THIN_BAR)
+    assert year_row.count(_THIN_BAR) > month_row.count(_THIN_BAR) > 0
+
+
+@pytest.mark.parametrize("width", _BAR_WIDTHS)
+def test_week_panel_shows_a_thin_bar_beside_its_percentage(width, moments, cfg):
+    (row,) = _bar_lines(week.render(moments["working_afternoon"], cfg, THEME), width)
+    assert "% of the workweek complete" in row
+    assert row.index("%") < row.index(_THIN_BAR)
+
+
+@pytest.mark.parametrize("width", _BAR_WIDTHS)
+def test_week_panel_has_no_bar_when_it_shows_no_percentage(width, moments, cfg):
+    assert _bar_lines(week.render(moments["saturday"], cfg, THEME), width) == []
+
+
+@pytest.mark.parametrize("width", _BAR_WIDTHS)
+def test_day_panel_keeps_the_only_large_bar(width, moments, cfg):
+    assert _LARGE_BAR not in _render_to_string(year.render(_YEAR_MOMENTS[0], THEME), width=width)
+    assert _LARGE_BAR not in _render_to_string(
+        week.render(moments["working_afternoon"], cfg, THEME), width=width
+    )
+
+    rendered = _render_to_string(day.render(moments["working_afternoon"], THEME), width=width)
+    assert _LARGE_BAR in rendered
+    assert _THIN_BAR not in rendered
+
+
+# Filled and unfilled part of a thin bar; rows of box borders are skipped.
+_THIN_BAR_RUN = re.compile("[━─]+")
+_BORDER_CORNERS = set("╭╮╰╯")
+
+
+def _render_as_seen(renderable, width: int, *, no_color: bool, height: int = 60) -> list[str]:
+    """Rendered rows as a terminal shows them, glyph for glyph, with colour on or off."""
+    console = Console(
+        file=StringIO(),
+        width=width,
+        height=height,
+        color_system="truecolor",
+        force_terminal=True,
+        legacy_windows=False,
+        no_color=no_color,
+        record=True,
+    )
+    console.print(renderable)
+    return console.export_text().rstrip("\n").split("\n")
+
+
+def _thin_bar_spans(rows: list[str]) -> list[tuple[int, int]]:
+    """(start column, length) of every thin bar, top to bottom."""
+    return [
+        match.span()
+        for row in rows
+        if not _BORDER_CORNERS & set(row)
+        for match in _THIN_BAR_RUN.finditer(row)
+    ]
+
+
+@pytest.mark.parametrize("no_color", [False, True])
+@pytest.mark.parametrize("now", _YEAR_MOMENTS)
+@pytest.mark.parametrize("width", [40, 80, 140, 200])
+def test_year_and_month_bars_share_start_column_and_length(width, now, no_color):
+    spans = _thin_bar_spans(_render_as_seen(year.render(now, THEME), width, no_color=no_color))
+    assert len(spans) == 2
+    (year_start, year_end), (month_start, month_end) = spans
+    assert year_start == month_start
+    assert year_end - year_start == month_end - month_start >= 8
+
+
+@pytest.mark.parametrize("no_color", [False, True])
+@pytest.mark.parametrize("width", [80, 130, 140, 200])
+def test_year_and_month_bars_align_in_the_dashboard(width, no_color, moments, cfg):
+    """The same check through the real layout, where the panel gets half the width.
+
+    Measured on the glyphs alone, as a terminal with colour off or a track
+    colour close to its background shows them: the visible bars, not just the
+    cells they occupy, must start together and be equally long.
+    """
+    layout = build_layout(THEME)
+    _update(layout, moments["working_afternoon"], cfg, THEME)
+    rows = [row[: width // 2] for row in _render_as_seen(layout, width, no_color=no_color)]
+
+    year_span, month_span, week_span = _thin_bar_spans(rows)
+    assert year_span == month_span
+    assert week_span[1] - week_span[0] >= 8

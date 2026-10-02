@@ -28,6 +28,22 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-02, post-tag UI change: thin progress bars for year, month and week
+
+*Asked:* thin bars next to the existing year, month and week percentages, one shared renderer for every bar including the daily one (which stays the only large bar), one line high, in the muted colour of their panel, colours from =theme.py=, the bar taking a bare fraction, no new strings outside the packs. Tests for the renderer at 0, 0.5 and 1 and for each panel at widths 80, 140 and 200.
+
+*Done:* new =ui/bar.py=. =progress_bar(fraction, color, track, large=False)= clamps the fraction to 0..1 and returns Rich's =ProgressBar= (thin rule) or, with =large=True=, the same block =Bar= the day panel had; it takes no datetime, schedule or config. =beside(label, bar, label_width=)= puts a bar on the label's line. =year.py= computes the year and month fractions once and derives both the percentage and the bar from them, with a shared label width so the two bars start in the same column. =week.py= passes the existing =_week_progress= fraction, so phase 4 swaps that one function. =day.py= calls =progress_bar(..., large=True)=. The filled part is =theme.muted=; the unfilled part is a new role =bar_track= (=grey23= in the grimdark palette). No new strings. Tests in =tests/test_bar.py= and =tests/test_panels.py=.
+
+*Review fixes, same day:* (1) the year and month bars did not line up once the value cell got tight, because the label column was only a minimum width that Rich collapsed. =beside= became the =Beside= renderable: the label column is a fixed =label_width=, the bar takes exactly the rest, and when fewer than 8 cells would be left the bar moves to its own line at full cell width. Start column and length now depend only on =label_width= and the cell, never on the text; tested on the panel and through the real layout at 80, 140 and 200. (2) The large daily bar now draws its unfilled part on =bar_track= as well (as the bar's background), and =track= is a required argument for both sizes.
+
+*Second review fix, same day:* the bars were reported as still starting at different columns at about 130 columns. Emitted cells were aligned at every width (checked in a real 130-column console buffer); the defect was visibility. The unfilled track was =grey23=, which is all but the background of the One Half Dark scheme (=#282C34=), and Rich's own =ProgressBar= draws no track at all with colour off, so only the filled parts showed: a long year bar and a stub of a month bar stuck to its text. The same made the large bar's new track invisible. =ui/bar.py= no longer wraps Rich's =ProgressBar= and =Bar=; it has one =ProgressBar= renderable that draws filled and unfilled cells with different glyphs (=━= over =─= thin, =█= over =░= large, ASCII pairs on legacy consoles), and =bar_track= is now =grey37=. Tests now compare the glyphs as shown, with colour on and off, on the panel and through the layout at 80, 130, 140 and 200; they failed before the change. Bars fill in whole cells now, no half or eighth cells.
+
+*Rejected:* a third table column for the bars, which would have squeezed the remark rows; a bar on off days, where the week panel shows no percentage to sit next to.
+
+*Observed:* =year.py= still has its row labels (=Year Progress=, =Month=, =Season= and so on) and the season names as literals rather than pack keys; pre-existing, left alone. In a narrow panel (the 80-column dashboard) the bar sits on the line under its label, which makes the year and week tables one or two rows taller. The earlier tests passed because they exported the cells with colour on and never asked whether the track could be seen.
+
+*Carried over:* nothing. Not committed, awaiting review.
+
 ** 2026-10-02, post-tag fix on the phase 2 line: header art shear
 
 *Asked:* the header art renders with its last line shifted although =header.txt= has no tabs. Find where the loader or the header panel changes per-line whitespace, fix it there, leave the asset alone, and add a test that every art asset renders with the file's leading whitespace on every line.

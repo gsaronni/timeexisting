@@ -42,6 +42,7 @@ class Theme:
     danger: str
     collector_alive: str
     collector_absent: str
+    bar_track: str
     season: dict[str, str]
     weekday: dict[int, str]
     break_type: dict[str, str]
@@ -85,6 +86,7 @@ def load_theme(name: str = DEFAULT_PALETTE) -> Theme:
         danger=roles.get("danger", "bold red"),
         collector_alive=roles.get("collector_alive", "dim green"),
         collector_absent=roles.get("collector_absent", "dim red"),
+        bar_track=roles.get("bar_track", "grey37"),
         season=dict(data.get("season", {})),
         weekday=weekday,
         break_type=dict(data.get("break", {})),

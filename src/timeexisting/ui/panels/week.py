@@ -20,6 +20,7 @@ from timeexisting.content.phrases import pick
 from timeexisting.domain.resolver import Resolved
 from timeexisting.domain.segments import Phase
 from timeexisting.domain.week import remaining_week, working_weekdays
+from timeexisting.ui.bar import Beside, progress_bar
 from timeexisting.ui.theme import Theme
 
 
@@ -58,8 +59,11 @@ def render(resolved: Resolved, cfg: Config, theme: Theme) -> Panel:
     if _is_off_day(resolved):
         status = pick("week.weekend_status")
     else:
-        percent = round(_week_progress(resolved, cfg) * 100, 1)
-        status = pick("week.workday_status").format(percent=percent)
+        fraction = _week_progress(resolved, cfg)
+        status = Beside(
+            pick("week.workday_status").format(percent=round(fraction * 100, 1)),
+            progress_bar(fraction, theme.muted, theme.bar_track),
+        )
     table.add_row(weekday_name, status)
     table.add_row("Comment", Text(comment, style=theme.emphasis))
 

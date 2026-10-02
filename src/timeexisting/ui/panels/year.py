@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 
 from timeexisting.content.phrases import pick
+from timeexisting.ui.bar import Beside, progress_bar
 from timeexisting.ui.theme import Theme
 
 _SEASON_BY_MONTH = {
@@ -49,12 +50,18 @@ def render(now: datetime, theme: Theme) -> Panel:
     table.add_column("Info", style=theme.muted)
     table.add_column("Value")
 
-    year_percent = round(day_of_year / total_days * 100, 1)
-    table.add_row("Year Progress", f"{year_percent}%")
+    year_fraction = day_of_year / total_days
+    month_fraction = now.day / days_in_month
+    year_value = f"{round(year_fraction * 100, 1)}%"
+    month_value = f"{now.strftime('%B')} - {round(month_fraction * 100, 1)}%"
+    value_width = max(len(year_value), len(month_value))
+
+    year_bar = progress_bar(year_fraction, theme.muted, theme.bar_track)
+    table.add_row("Year Progress", Beside(year_value, year_bar, label_width=value_width))
     table.add_row("", f"{day_of_year}/{total_days} days")
 
-    month_percent = round(now.day / days_in_month * 100, 1)
-    table.add_row("Month", f"{now.strftime('%B')} - {month_percent}%")
+    month_bar = progress_bar(month_fraction, theme.muted, theme.bar_track)
+    table.add_row("Month", Beside(month_value, month_bar, label_width=value_width))
     table.add_row("", f"{now.day}/{days_in_month} days")
 
     table.add_row("Season", Text(season, style=season_color))

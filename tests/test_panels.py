@@ -1,5 +1,6 @@
 import tempfile
 from datetime import UTC, date, datetime, time, timedelta
+from importlib.resources import files
 from io import StringIO
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from rich.console import Console
 
 from timeexisting import paths
 from timeexisting.config import loader
+from timeexisting.content.art import ART_DIR, MANIFEST
 from timeexisting.domain.resolver import resolve
 from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ui.panels import day, header, week, year
@@ -47,8 +49,8 @@ _YEAR_MOMENTS = [
 ]
 
 
-def _render_to_string(renderable) -> str:
-    console = Console(file=StringIO(), width=100, record=True)
+def _render_to_string(renderable, width: int = 100) -> str:
+    console = Console(file=StringIO(), width=width, record=True)
     console.print(renderable)
     return console.export_text()
 
@@ -125,3 +127,25 @@ def test_pre_work_never_shows_negative_countdown(cfg):
     resolved = resolve(plan.start - timedelta(minutes=1), plan)
     rendered = _render_to_string(day.render(resolved, THEME))
     assert "-" not in rendered.split("Work begins in:")[1].split("\n")[0]
+
+
+@pytest.mark.parametrize("width", [100, 140, 200])
+def test_header_art_keeps_the_leading_whitespace_of_the_file(width):
+    """Every art line sits at the file's own indent plus one shared offset.
+
+    Regression: the art was justified line by line, so lines of different
+    lengths were centred separately and the last one visibly shifted.
+    """
+    raw = files("timeexisting").joinpath(ART_DIR).joinpath(MANIFEST["header"]).read_text(encoding="utf-8")
+    expected = [line.rstrip() for line in raw.rstrip().split("\n")]
+    inner_width = width - 4  # border plus panel padding, both sides
+
+    rows = _render_to_string(header.render(THEME), width=width).split("\n")
+    rendered = [row[1:-1].rstrip() for row in rows[1 : 1 + len(expected)]]
+
+    offsets = set()
+    for got, want in zip(rendered, expected, strict=True):
+        offset = len(got) - len(got.lstrip()) - (len(want) - len(want.lstrip()))
+        offsets.add(offset)
+        assert got.lstrip() == want.lstrip()[: inner_width - (len(want) - len(want.lstrip()))].rstrip()
+    assert len(offsets) == 1

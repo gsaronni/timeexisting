@@ -28,6 +28,18 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-02, post-tag fix on the phase 2 line: header art shear
+
+*Asked:* the header art renders with its last line shifted although =header.txt= has no tabs. Find where the loader or the header panel changes per-line whitespace, fix it there, leave the asset alone, and add a test that every art asset renders with the file's leading whitespace on every line.
+
+*Done:* the cause was =ui/panels/header.py=, not the file: the art went in as =Text(art, justify="center")=, and Rich justifies line by line, stripping each line's trailing whitespace and centring it on its own. The six header lines have different lengths, so each got its own offset (1, 2, 3 or 6 columns); the last line, shortest once the loader's =rstrip()= takes its trailing spaces, moved the most. New =ui/art.py= with =art_block= (one =Text=, no justify, =no_wrap=, cropped rather than wrapped) and =centered_art_block= (the same inside =Align.center=, one offset for the whole block). The header uses the centred block, the day panels use =art_block=. Tests: every manifest asset through both helpers, and the header panel itself at widths 100, 140 and 200.
+
+*Rejected:* editing the asset; changing the loader's =rstrip()=, which only touches trailing whitespace and is harmless once nothing centres per line.
+
+*Observed:* below about 103 columns the widest header line (99 cells) used to wrap its last character onto a row of its own and push the panel past its fixed height; it is now cropped instead. The header grid is still not expanded, so on a wide terminal the banner sits at the left of the panel, as before.
+
+*Carried over:* nothing. Not committed, awaiting review.
+
 ** 2026-09-23 to 2026-09-29, phase 2: persistence
 
 *Asked:* execute =docs/phase-2-prompt.md= one step at a time, stopping for review after each: the headless collector, the append-only ledger and its replay, the single-instance lockfile, diagnostic logging, clean stop on Windows session end, the viewer spawning the collector, and the Startup shortcut. The collector records its own presence only. No lock or OS sleep detection, no absence classification, no balances: those are phases 3 and 4.

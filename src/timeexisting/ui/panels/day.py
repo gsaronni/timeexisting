@@ -17,6 +17,7 @@ from timeexisting.content.art import load_art
 from timeexisting.content.phrases import pick
 from timeexisting.domain.resolver import Resolved
 from timeexisting.domain.segments import Phase, Segment
+from timeexisting.ui.art import art_block
 from timeexisting.ui.theme import Theme
 
 _ANIMATION_FRAMES = ("|", "/", "-", "\\")
@@ -71,7 +72,7 @@ def _render_off_day(resolved: Resolved, theme: Theme) -> Panel:
     content.add_row(Text(heading, style=theme.weekend_title, justify="center"))
     content.add_row(Text(message, style=theme.weekend_message, justify="center"))
     if art:
-        content.add_row(Text(art, style=theme.muted))
+        content.add_row(art_block(art, theme.muted))
     content.add_row(Text(pick("weekend.footer"), style=theme.footer, justify="center"))
     content.add_row(_current_time_line(resolved, theme))
 
@@ -102,7 +103,7 @@ def _render_pre_work(resolved: Resolved, theme: Theme) -> Panel:
 
     content = Table.grid(padding=1)
     if art:
-        content.add_row(Text(art, style=theme.muted))
+        content.add_row(art_block(art, theme.muted))
     content.add_row(Text(message, style=theme.emphasis, justify="center"))
     content.add_row(
         Text(
@@ -125,7 +126,7 @@ def _render_post_work(resolved: Resolved, theme: Theme) -> Panel:
 
     content = Table.grid(padding=1)
     if art:
-        content.add_row(Text(art, style=theme.muted))
+        content.add_row(art_block(art, theme.muted))
     content.add_row(Text(message, style=theme.post_work_message, justify="center"))
     content.add_row(
         Text(
@@ -152,7 +153,7 @@ def _render_lunch(resolved: Resolved, theme: Theme) -> Panel:
     content.add_row(Text(heading, style=theme.bold(color), justify="center"))
     content.add_row(Text(message, style=theme.emphasis, justify="center"))
     if art:
-        content.add_row(Text(art, style=theme.muted))
+        content.add_row(art_block(art, theme.muted))
     template = pick("lunch.time_remaining")
     content.add_row(Text(template.format(minutes=remaining_minutes), style=theme.countdown, justify="center"))
     content.add_row(_current_time_line(resolved, theme))

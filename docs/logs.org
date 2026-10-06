@@ -28,6 +28,166 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-06, phase 3 step 0: evidence inventory
+
+*Asked:* step 0 of =docs/phase-3-prompt.md=, read-only. Establish which Windows records carry sleep, wake, lock and unlock boundaries on the work laptop, lay them against the ledger, and resolve the two reference cases (26 September dark wake, 2 October start). Aggregates only, then stop for decisions.
+
+*Done:* System log and selected operational channels queried unelevated over 15 September to 6 October 2026 (ledger overlap 25 September to 6 October), with scratch scripts outside the repository. No code, no other file touched. Times below are local (CEST) unless marked UTC.
+
+Machine and access:
+
+| Check | Result |
+|---|---|
+| =powercfg /a= | Modern Standby (S0 Low Power Idle, Network Connected); S3 unavailable; Hibernate available; hybrid sleep and fast startup off |
+| System log via =win32evtlog.EvtQuery=, unelevated | readable, 2319 records in the window |
+| =Microsoft-Windows-Winlogon/Operational=, unelevated | readable; 1 MB circular, retention false, oldest record 1 September (about 35 days, about 70 records per day) |
+| =Microsoft-Windows-HelloForBusiness/Operational=, unelevated | readable |
+| Security log (4800/4801), unelevated | access denied |
+| =powercfg /sleepstudy=, unelevated | needs admin, not used |
+
+Counts per event ID per local day (System log; lock and unlock from Winlogon/Operational 811 =Sens=):
+
+| Day | PT 1 | KP 40 | KP 41 | KP 42 | KP 107 | KP 172 | KP 506 | KP 507 | KP 566 | KG 1 | KG 12 | KG 13 | EL 6005 | EL 6006 | EL 6008 | lock | unlock |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Tue 15 Sep | 0 | 0 | 0 | 0 | 0 | 3 | 14 | 13 | 34 | 9 | 0 | 0 | 0 | 0 | 0 | 9 | 8 |
+| Wed 16 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 11 | 11 | 28 | 9 | 0 | 0 | 0 | 0 | 0 | 8 | 8 |
+| Thu 17 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 14 | 14 | 33 | 8 | 0 | 0 | 0 | 0 | 0 | 9 | 9 |
+| Fri 18 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 19 | 19 | 47 | 10 | 0 | 0 | 0 | 0 | 0 | 14 | 14 |
+| Sat 19 Sep | 0 | 1 | 0 | 1 | 1 | 1 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Mon 21 Sep | 1 | 0 | 0 | 0 | 0 | 3 | 16 | 15 | 37 | 17 | 2 | 2 | 2 | 2 | 0 | 9 | 9 |
+| Tue 22 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 12 | 12 | 29 | 9 | 0 | 0 | 0 | 0 | 0 | 9 | 9 |
+| Wed 23 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 15 | 15 | 37 | 9 | 0 | 0 | 0 | 0 | 0 | 12 | 12 |
+| Thu 24 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 8 | 8 | 20 | 7 | 1 | 1 | 1 | 1 | 0 | 5 | 5 |
+| Fri 25 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 16 | 16 | 35 | 6 | 0 | 0 | 0 | 0 | 0 | 10 | 10 |
+| Sat 26 Sep | 1 | 1 | 0 | 1 | 1 | 6 | 6 | 6 | 14 | 6 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
+| Sun 27 Sep | 0 | 1 | 0 | 1 | 1 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| Mon 28 Sep | 1 | 0 | 0 | 0 | 0 | 3 | 12 | 11 | 27 | 11 | 1 | 1 | 1 | 1 | 0 | 8 | 8 |
+| Tue 29 Sep | 0 | 0 | 0 | 0 | 0 | 4 | 24 | 24 | 64 | 16 | 0 | 0 | 0 | 0 | 0 | 8 | 8 |
+| Wed 30 Sep | 0 | 0 | 0 | 0 | 0 | 8 | 34 | 34 | 87 | 20 | 0 | 0 | 0 | 0 | 0 | 15 | 14 |
+| Thu 1 Oct | 0 | 0 | 0 | 0 | 0 | 4 | 36 | 36 | 91 | 20 | 0 | 0 | 0 | 0 | 0 | 15 | 15 |
+| Fri 2 Oct | 0 | 0 | 0 | 0 | 0 | 4 | 20 | 20 | 52 | 12 | 0 | 0 | 0 | 0 | 0 | 8 | 8 |
+| Sat 3 Oct | 0 | 1 | 0 | 1 | 1 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Sun 4 Oct | 1 | 0 | 0 | 0 | 0 | 3 | 3 | 2 | 6 | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
+| Mon 5 Oct | 0 | 0 | 0 | 0 | 0 | 4 | 17 | 17 | 38 | 8 | 2 | 2 | 2 | 2 | 0 | 13 | 12 |
+| Tue 6 Oct | 0 | 0 | 0 | 0 | 0 | 1 | 1 | 2 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 2 |
+| Total | 4 | 4 | 0 | 4 | 4 | 74 | 278 | 278 | 685 | 183 | 6 | 6 | 6 | 6 | 0 | 243 | 242 |
+
+PT is Power-Troubleshooter, KP Kernel-Power, KG Kernel-General, EL EventLog. No Kernel-Power 41 and no EventLog 6008: no dirty shutdown in the window.
+
+Kernel-Power 506 and 507 reasons (the =Reason= field, names as rendered by 506 and 507):
+
+| Code | Name | 506 | 507 |
+|---|---|---|---|
+| 12 | Idle Timeout | 199 | 0 |
+| 31 | Input Keyboard | 0 | 112 |
+| 32 | Input Mouse | 0 | 83 |
+| 15 | Lid | 20 | 33 |
+| 55 | Austerity Battery Drain Budget Exceeded | 18 | 18 |
+| 11 | Screen Off Request | 17 | 0 |
+| 28 | AC/DC Display Burst Suppressed | 13 | 13 |
+| 1 | Power Button | 2 | 10 |
+| 20 | Sleep, Hibernate, or Shutdown | 4 | 4 |
+| 16777220 | unnamed | 4 | 4 |
+| 6 | User Display Burst | 1 | 1 |
+
+Of 278 exits (507), 50 are chain steps (a 506 follows within 2 s) and 228 are terminal. All 18 Austerity exits and all 4 unnamed exits are chain steps.
+
+Kernel-Power 566 carries the same numeric =Reason= as the 506 or 507 beside it (508 of 508 pairs within 50 ms), but its message table names the numbers differently: 12 renders as "SessionUnlock" on 566 and "Idle Timeout" on 506, 32 as "InputHid" against "Input Mouse", 31 as "InputAccelerometer" against "Input Keyboard". 566 says nothing about the session lock.
+
+Hibernation (Kernel-Power 42, 40, 107):
+
+| Measure | Result |
+|---|---|
+| 42 sleep reasons | one: 13, "Hibernate from Sleep - Standby Battery Budget Exceeded", TargetState 5, 4 times (19 Sep, 26 Sep, 27 Sep, 3 Oct) |
+| 40 drivers | =\Driver\vpcivsp= (Hyper-V virtual PCI, used by WSL2), 4 of 4, 0.2 to 0.3 s before the 42 |
+| 107 within a minute of the 40 | 4 of 4, 10 to 17 s later |
+| Hibernations that completed anyway | 4 of 4 |
+
+The 107 is not a failed hibernation. It is written at the real resume, stamped with the clock frozen at hibernation entry: each is followed at the real wake by a Kernel-General 1 with Reason 2 whose correction equals the whole hibernation (159127 s, 31153 s, 55861 s, 123911 s) and whose =OldTime= matches the 107 timestamp to the millisecond, and by a Power-Troubleshooter 1 giving the same span. The driver aborted none of them, as far as the log shows.
+
+Power-Troubleshooter 1: 4 records, exactly one per hibernate wake, never for a Modern Standby wake; Wake Source "Unknown" each time; written 0.5 to 2.5 s after its own =WakeTime=. Partial under Modern Standby, so 506 and 507 carry the boundaries.
+
+Kernel-General 1 time deltas (183 records):
+
+| Absolute delta | Count | Note |
+|---|---|---|
+| under 10 ms | 163 | |
+| 10 to 100 ms | 8 | |
+| 1 to 2.6 s | 8 | Reason 1 time-service corrections after resume, Reason 2 at hibernation entry |
+| 30 s and over | 4 | all Reason 2, the hibernate wakes |
+
+The largest correction outside a hibernate wake is 2.6 s, against a 60 s clock-jump threshold.
+
+Dark wakes caught by the collector (collector activity in a sleep span with no unlock): 4, all zero-length.
+
+| Day | Cause | Session |
+|---|---|---|
+| Sat 26 Sep | sleep to hibernate transition (507 reason 20, then 40 and 42) | locked |
+| Mon 28 Sep | Austerity battery budget (507 reason 55) | locked |
+| Sat 3 Oct | sleep to hibernate transition | locked |
+| Sun 4 Oct | Austerity battery budget | unlocked: lid closed 2 min earlier, before the deferred lock |
+
+Across the log: 4 hibernate transitions and 18 Austerity wakes; the Austerity ones are usually milliseconds long and no tick lands in them. A related non-dark case: on 5 Oct a mouse touch woke the machine without an unlock and phase 2 credited 391 s.
+
+Session state at resume (228 terminal exits):
+
+| State at exit | Count | Reasons |
+|---|---|---|
+| locked | 223 | |
+| unlocked | 5 | 4 Input Mouse after an idle screen-off on an unlocked session, 1 Lid reopened after 33 s |
+
+All 5 unlocked resumes came after short standbys, before the deferred lock. After a lid close on an unlocked session the lock lands 197 to 448 s later (about 290 s typical), not at the close.
+
+Winlogon/Operational 811 with =SubscriberName= =Sens=: =Event= 5 unlock, 4 lock, 2 logon, 3 logoff, 12 shell start. The mapping is inferred, not rendered by Windows: 4 and 5 alternate strictly (0 violations in 485), 241 of 242 unlocks follow a HelloForBusiness 5001 sign-in within 2 s, and 2, 3 and 12 sit at every boot and logoff. Each record carries the user SID in =Security UserID=, so it can be filtered to this user.
+
+Ledger against log (21 collector gaps):
+
+| Explained by | Gaps | Note |
+|---|---|---|
+| 506 and 507 alone | 16 | residue at most 32 s, at the edges, one tick |
+| 506 and 507 plus Power-Troubleshooter 1 | 3 | the hibernated stretches |
+| boot records (6006, 6005, Kernel-General 12 and 13) plus logon | 2 | restarts on 28 Sep and 5 Oct, each leaving downtime with the machine on: about 7 h 17 m on 28 Sep before the collector was launched, about 4 min on 5 Oct |
+| nothing | 0 | |
+
+| Measure | Result |
+|---|---|
+| Collector running time in the overlap | 135929 s |
+| of which session locked | 30952 s (22.8 %), all credited as presence by phase 2 |
+| of which inside a 506 to 507 window | 26875 s (screen-off phase, desktop apps still run) |
+| Collector resume detection after the terminal 507 | median 12.7 s, bounded by the 30 s tick |
+| Log write lag for 506, 507, Winlogon records | not derivable: =TimeCreated= is the event time |
+
+Reference case 1, Saturday 26 September. Lid closed on an unlocked session 25 Sep 16:36:22 (506 chain from 16:36:21, reason 11 then 28 then 15); lock 16:41:20 during standby (Winlogon 811 Event 4); Austerity chain step 17:14:50; 507 reason 20 at 07:50:45.616 (05:50:45 UTC); the collector ticked at 07:50:49 (phase 2 zero-length presence); 40 at 07:50:51.475; 42 reason 13 at 07:50:51.744; Kernel-General 1 Reason 2 +1.289 s at 07:51:01; 107 stamped 07:51:06.019 (stale); Kernel-General 1 Reason 2 +31153.482 s at 16:30:19.500; Power-Troubleshooter 1 at 16:30:23 with Sleep 07:50:45.61 and Wake 16:30:21.57; unlock at 16:30:29.518 (Winlogon 811 Event 5, Hello 5001 beside it). Phase 3 records suspend at 16:36:21 on 25 Sep, resume 07:50:45 (locked, away), suspend 07:50:51 (hibernate), resume 16:30:21.57 from the Power-Troubleshooter =WakeTime=, unlock 16:30:29. Zero present time before 16:30:29.
+
+Reference case 2, Friday 2 October. Standby from 1 Oct 16:32:07 (506 reason 11, lid chain at 16:32:11); lock 16:37:08; 507 reason 15 (Lid) at 09:33:20.998 after 60973 s in standby; Hello PIN sign-in 09:33:30.466; unlock 09:33:30.468 (Winlogon 811 Event 5); Kernel-Power 105 power source change 09:33:35; collector detected the resume at 09:33:44; lock 09:36:28; 506 reason 12 (Idle Timeout) 09:36:59.577; 507 reason 32 (Input Mouse) 09:37:44.222; unlock 09:37:50.380. The first unlock is 09:33:30, 14 s before the collector's start: phase 2 did not credit presence before an unlock that morning, contrary to the prompt's premise. The only defect is that the typed 08:55 was not remembered across launches (step 8). Phase 3 records resume 09:33:21 (away), unlock 09:33:30 (first presence, observed start), lock 09:36:28, suspend 09:36:59, resume 09:37:44, unlock 09:37:50; with step 8 the typed 08:55 is a =day_start= from the user and wins on every launch that day.
+
+Unlock evidence sources:
+
+| Source | Gives | Retroactive on relaunch |
+|---|---|---|
+| WTS session notification | live lock and unlock, no timestamp of its own | no; a lock during standby would be stamped when the suspended collector next runs |
+| =OpenInputDesktop= probe | current state | no |
+| Session logon time | the logon only | yes, once per boot |
+| Winlogon/Operational 811 =Sens= | lock, unlock, logon, logoff with exact times | yes, within the channel's retention |
+| Security 4800/4801 | lock, unlock | not usable: needs admin |
+| System log | nothing on locking | n/a |
+
+*Decided after review:*
+1. Sleep boundaries: 506 and 507 with chain steps collapsed (a 507 followed by a 506 within 2 s is not a wake). Power-Troubleshooter 1 =WakeTime= for hibernate wakes, Kernel-General 1 Reason 2 as fallback when Power-Troubleshooter 1 is absent. Never the 107 timestamp. 566 ignored.
+2. Winlogon/Operational 811 =Sens= adopted. WTS is the live signal; Winlogon is the timestamp authority when both exist and the sole source on recovery. The code mapping gets a fixture test built from real records (synthetic values, real schema) and the live Win+L check before use. A startup self-check of channel readability; on failure, fall back to WTS only and write a ledger note. The retention limit is documented.
+3. Step 7: a 507 with reason 31, 32, 15 or 1 is input evidence at its timestamp. =GetLastInputInfo= is kept only for a resume onto an unlocked session whose 507 reason is not one of those.
+4. The 5 October =session_end= failure is out of phase 3 scope, recorded below as an open phase 2 defect, not fixed in this session.
+5. Constraint added: =te= never requires elevation; no source that needs admin enters the design.
+
+*Rejected:* Power-Troubleshooter 1 as the primary sleep boundary (absent for every Modern Standby wake); 566 as a lock or unlock signal; the 107 timestamp as a resume time; Security 4800/4801 and =powercfg /sleepstudy= (admin only).
+
+*Observed:*
+- Open phase 2 defect: the restart on 5 October wrote no =session_end=. Logoff at 10:15:12, no =WM_QUERYENDSESSION= line in the collector log, and recovery at the next start inferred an =unclean= stop at the last tick (10:14:55). The ledger holds no =session_end= stop at all, which contradicts the passing phase 2 re-test recorded in the phase 2 entry.
+- The prompt's description of 26 September had the order 42 then 40; the log has 40 first, 0.27 s before the 42.
+- The collector keeps ticking through the screen-off phase of Modern Standby, which is why phase 2 credited 22.8 % of its running time while the session was locked.
+
+*Carried over:* step 1 (spec amendments), with the decisions above folded into the roadmap. Not committed, awaiting review.
+
 ** 2026-10-02, post-tag UI change: thin progress bars for year, month and week
 
 *Asked:* thin bars next to the existing year, month and week percentages, one shared renderer for every bar including the daily one (which stays the only large bar), one line high, in the muted colour of their panel, colours from =theme.py=, the bar taking a bare fraction, no new strings outside the packs. Tests for the renderer at 0, 0.5 and 1 and for each panel at widths 80, 140 and 200.

@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+    branches: [master]
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -16,7 +17,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev,windows]"
+      - run: pip install -e ".[dev]"
       - run: ruff format --check .
       - run: ruff check .
       - run: pytest
+      # The editable install above builds an editable wheel, not the real one, so a broken wheel build passed CI. Build it, then run it from a clean environment.
+      - name: wheel
+        shell: bash
+        run: |
+          pip install uv
+          uv build --wheel --out-dir dist
+          uvx --isolated --from dist/timeexisting-*.whl te --help

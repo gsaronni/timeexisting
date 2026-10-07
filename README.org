@@ -62,7 +62,7 @@ git clone https://github.com/gsaronni/timeexisting.git
 cd timeexisting
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev,windows]"
+pip install -e ".[dev]"
 te --help
 #+end_src
 

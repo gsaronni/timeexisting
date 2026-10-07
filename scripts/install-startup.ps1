@@ -65,7 +65,7 @@ if ($Uninstall) {
 $Venv = Join-Path $Repository '.venv'
 $Pythonw = Join-Path $Venv 'Scripts\pythonw.exe'
 if (-not (Test-Path -LiteralPath $Venv -PathType Container)) {
-    Stop-Refused "no venv at $Venv. Create it first: python -m venv .venv, then pip install -e "".[dev,windows]""."
+    Stop-Refused "no venv at $Venv. Create it first: python -m venv .venv, then pip install -e "".[dev]""."
 }
 if (-not (Test-Path -LiteralPath $Pythonw -PathType Leaf)) {
     Stop-Refused "no pythonw.exe at $Pythonw. The venv is incomplete; recreate it."

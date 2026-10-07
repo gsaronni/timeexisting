@@ -85,8 +85,8 @@ Three files sit directly in the package:
 The single manifest for building, installing and checking the project. Four things live in it and nowhere else:
 
 - =[build-system]= names hatchling as the tool that turns the source tree into an installable wheel.
-- =[project]= is the package metadata: name, version, Python floor, dependencies, and the =te= console script that pip creates in the venv's =Scripts= directory.
-- =[project.optional-dependencies]= holds the extras: =dev= for ruff, pytest and pre-commit, =windows= for the toast and =pywin32= packages, so =pip install -e ".[dev,windows]"= pulls exactly the set a given machine needs.
+- =[project]= is the package metadata: name, version, Python floor, dependencies, and the =te= console script that pip creates in the venv's =Scripts= directory. Platform-only dependencies (=pywin32=, =tzdata=) carry a =sys_platform == 'win32'= marker, so a plain install pulls them on Windows and skips them elsewhere, with no extra to remember.
+- =[project.optional-dependencies]= holds the one extra, =dev=, for ruff, pytest and pre-commit: =pip install -e ".[dev]"=.
 - =[tool.ruff]= and =[tool.pytest.ini_options]= configure the linter and the test runner, so neither needs its own file.
 
 The =readme= entry names =README.org= with an explicit content type, because hatchling only recognises =.md=, =.rst= and =.txt= by extension.

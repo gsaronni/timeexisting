@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 39, 23 September 2026.
+*Last revised:* week 41, 7 October 2026 (phase 3 step 1: presence model, event log sources, recovery against checkpoints).
 
 
 * 1. Purpose and Scope
@@ -67,28 +67,36 @@ Four layers, strictly ordered. No layer reaches past the one below it.
 
 | Process | Command | Role |
 |---|---|---|
-| Collector | =te collect= | Headless. Polls presence, writes the ledger, fires the end-of-day power action. Started at login. |
-| Viewer | =te= | Rich dashboard. Reads the ledger. Writes only classification, notes, flags and manual events. |
+| Collector | =te collect= | Headless. Records session, power and event log transitions, writes the ledger, fires the end-of-day power action. Started at login. |
+| Viewer | =te= | Rich dashboard. Reads the ledger. Writes only classification, notes, flags, the confirmed day start and manual events. |
 
 The dashboard is not open all day. The collector must survive the terminal closing. There is no IPC: the ledger file is the only shared state.
 
 ** Collector lifecycle
 
 - Lockfile at =state/collector-{host}.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
-- The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json= with the current UTC timestamp and the collector's PID: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint.
-- Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick.
-- Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= after a suspend.
-- Suspend. If the clock shows more than twice the tick interval since the previous tick, the machine was suspended. The collector writes =collector_stop= at the previous tick's timestamp (=inferred=, reason =suspended=) and =collector_start= at now (=observed=, reason =resumed=).
+- The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json=: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint. The checkpoint holds the current UTC timestamp and the collector's PID and, from phase 3, the last known session state (for the probe, section 6), any pending gap still waiting for its event log record, and the Winlogon/Operational read cursor (section 8). State that must survive a crash lives here, never in memory alone.
+- Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick. The gap that follows is backfilled from the event logs (section 8).
+- Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= on phase 2 shards, where a clock jump was written as a stop and start pair.
+- Clock jump. If the clock shows more than twice the tick interval (60 seconds) since the previous tick, the machine was suspended. From phase 3 this no longer writes a =collector_stop= and =collector_start= pair: the collector holds the gap as pending in the checkpoint and resolves it against the System log (section 8), writing one =suspend= and one =resume=. Phase 2 shards keep their =suspended= and =resumed= pairs, which replay reads as an inferred suspend and resume (section 6). The threshold is well clear of real clock corrections: the largest Kernel-General 1 correction outside a hibernate wake over 21 days at step 0 was 2.6 seconds.
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile, attach. Stale lock, reclaim and spawn.
 - =q= quits the viewer and leaves the collector. =Q= stops both.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
-- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. It creates a hidden top-level window on a daemon thread: a registered window class, no parent, no =WS_VISIBLE=, never shown, =WS_EX_TOOLWINDOW= so it has no taskbar entry. Not a message-only window (=HWND_MESSAGE= parent): those cannot be enumerated and do not receive broadcast messages, and the session-end messages go to the session's top-level windows, so a message-only window never hears them; the first live restart confirmed it. The window answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, deletes the checkpoint, then releases the lock, before the process dies. Both messages are logged at INFO with =wParam= and =lParam= on arrival, so a live test shows whether delivery happened even when the write fails.
+- The hidden window. On Windows the collector creates one hidden top-level window on a daemon thread: a registered window class, no parent, no =WS_VISIBLE=, never shown, =WS_EX_TOOLWINDOW= so it has no taskbar entry. Not a message-only window (=HWND_MESSAGE= parent): those cannot be enumerated and do not receive broadcast messages, and the session-end and power broadcasts go to the session's top-level windows, so a message-only window never hears them; the first live restart confirmed it. This one window is the receiver for every Windows notification the collector uses, and no second window is created:
+  - Session end: =WM_QUERYENDSESSION= and =WM_ENDSESSION=.
+  - Session change: =WM_WTSSESSION_CHANGE=, after =WTSRegisterSessionNotification= for this session only; =WTS_SESSION_LOCK= and =WTS_SESSION_UNLOCK= become =lock= and =unlock=, source =wts=. Unregistered on teardown.
+  - Power: =WM_POWERBROADCAST=; =PBT_APMSUSPEND= becomes =suspend= and the resume messages become =resume=, source =power=, with the message name in =detail=.
+  - Every message is logged at INFO with =wParam= and =lParam= on arrival, so a live test shows whether delivery happened even when a write fails.
+- Single writer. The window thread never appends to the ledger. It puts each session or power transition, stamped at receipt, on a queue that the collector's tick loop drains, so ledger order is append order and the tick loop's append-and-fsync is the only write path. The one exception is session end: there is no later tick, so the window thread runs the shutdown itself, serialised against the tick loop by the shutdown mutex.
+- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. The hidden window answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, deletes the checkpoint, then releases the lock, before the process dies. A restart on 5 October 2026 wrote no =session_end= and was recovered as =unclean=; this is an open phase 2 defect recorded in =logs.org=, outside phase 3.
 - When =te collect= runs in a terminal, a console control handler (=SetConsoleCtrlHandler=) is registered as well, for =CTRL_CLOSE_EVENT=, =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT=. Both paths call one idempotent shutdown function, since logoff can deliver both.
 - The collector runs across midnight without restarting. Day state is derived per tick from the current date, never captured at startup.
 
 ** Subcommands
 
-=te= (viewer), =te collect=, =te stats=, =te edit=, =te day=, =te demo=, =te content lint=.
+=te= (viewer), =te collect=, =te collect status=, =te collect stop=, =te collect timeline=, =te config=, =te stats=, =te edit=, =te day=, =te demo=, =te content lint=.
+
+=te collect timeline [--date YYYY-MM-DD]= is a read-only diagnostic: it replays the ledger and prints the day's typed intervals (section 6) in local time with type, confidence, source and duration, as plain text with no Rich live surface. It writes nothing and needs no running collector.
 
 ** Purity rule
 
@@ -122,12 +130,13 @@ Three independent clamps. None is the shift length. Exceeding 7h24m accrues norm
 
 Highest priority first:
 
-1. =--start HH:MM=.
-2. First =unlock= or =resume= in today's ledger for this profile.
-3. =psutil.boot_time()= as a sanity clamp only. A first unlock earlier than boot means the ledger is inconsistent; the tracker says so rather than computing.
-4. Interactive prompt on first viewer launch of the day, defaulting to 09:00 on an empty return.
+1. =--start HH:MM=, or a start the user typed or confirmed earlier today. Either is written to the ledger as a =day_start= event, source =user=, the moment it is entered or confirmed (=--start= or the prompt), and wins on every later viewer launch that day, ahead of any observed evidence. A later =day_start= for the same day supersedes an earlier one, so =--start= still wins over a start confirmed before it. A typed start is a fact, not a default: on 2 October 2026 a confirmed 08:55 became 09:33 on a relaunch because it was not recorded.
+2. The first instant of the current local day, at or after =earliest_credit= (=credit.earliest=, 07:00), at which the derived state (section 6) is =present= for the work profile. Presence is opened by an =unlock=, or an =input= after a resume on an unlocked session. A presence interval opened before the clamp and still open at it starts the day at the clamp, with the provenance of the event that opened it; one that closes before the clamp is displayed, never a start. Collector liveness is never a start: a =collector_start=, a =resume= or a dark wake opens nothing.
+3. The session logon time, if it falls on the current local day.
+4. =psutil.boot_time()= as a sanity clamp only, never a start. A presence-opening event earlier than boot means the ledger is inconsistent; the tracker says so rather than computing.
+5. The interactive prompt on the first viewer launch of the day, only when none of the above exists. Its default comes from the same evidence, never from collector liveness, and falls back to =credit.default_start= on an empty ledger. In the night window or after =credit.latest=, where asking is pointless, the fallback is taken without asking.
 
-Nothing is ever assumed silently.
+The resolved start carries its provenance: =flag= (rule 1, from =--start=), =prompt= (rule 1 or 5, typed or confirmed at the prompt; the =day_start= records which of the two in =detail=), =observed= (rule 2, from an observed event), =logon= (rule 3), =inferred= (rule 2 from an inferred event, or a fallback taken without asking). The viewer renders an inferred start differently from an observed one. Nothing assumed silently: an inferred start is labelled as inferred.
 
 ** Derived day shape
 
@@ -198,35 +207,142 @@ One JSON object per line, UTF-8, =\n= terminated.
 | =ts= | Aware UTC, ISO 8601. |
 | =host= | Shard name. |
 | =profile= | =work=, =fun=, =homelab=. Only =work= feeds the 37h accounting. Mapped from hostname in config. |
-| =event= | =collector_start=, =collector_stop=, =lock=, =unlock=, =suspend=, =resume=, =classify=, =note=, =dayflag=, =manual_start=, =manual_end=, =void=. |
-| =source= | =win32=, =eventlog=, =dbus=, =collector=, =manual=, =backfill=. |
+| =event= | =collector_start=, =collector_stop=, =lock=, =unlock=, =suspend=, =resume=, =boot=, =input=, =day_start=, =classify=, =note=, =dayflag=, =manual_start=, =manual_end=, =void=. |
+| =source= | =win32=, =wts=, =probe=, =power=, =eventlog=, =clock=, =logon=, =user=, =dbus=, =collector=, =manual=, =backfill=. |
 | =confidence= | =observed= or =inferred=. Rendered differently, never equated. |
+| =data= | Optional. String keys to string values, event-specific. |
 
-** Transitions, not heartbeats
+Event vocabulary:
 
-The ledger records transitions only. The collector ticks every 30 seconds (=collector.tick=), but a tick writes nothing to the ledger; it overwrites the checkpoint file (section 3), which is state, not ledger. =collector_start= and =collector_stop= bound the collector's own presence, and every =collector_start= carries a reason, =launch= or =resumed=. An edge the collector could not observe directly, a stop recovered from a leftover checkpoint (reason =unclean=) or a stop placed at the last tick before a clock jump (reason =suspended=), is written with confidence =inferred= and is accurate to one tick.
+| Event | Meaning | Sources | =data= |
+|---|---|---|---|
+| =collector_start= | The collector began observing | =collector= | =reason=: =launch=, or =resumed= on phase 2 shards |
+| =collector_stop= | The collector stopped observing | =collector= | =reason=: =stop_file=, =signal=, =console_close=, =session_end=, =max_ticks=, =unclean=, or =suspended= on phase 2 shards |
+| =lock= | Session locked | =wts=, =eventlog=, =probe= | =detail=: for =eventlog=, the channel and the Winlogon code |
+| =unlock= | Session unlocked or logged on | =wts=, =eventlog=, =probe=, =logon= | =detail= as for =lock= |
+| =suspend= | Machine entered sleep or hibernation | =power=, =eventlog=, =clock= | =detail=: the power message, or the 506 reason |
+| =resume= | Machine woke | =power=, =eventlog=, =clock= | =detail=: the power message, or the 507 reason or wake source |
+| =boot= | A shutdown or start boundary | =eventlog= (the boot records), =collector= (=boot_time()= in an uncovered stretch, section 8) | =detail=: the record (EventLog 6006 or Kernel-General 13 for shutdown, EventLog 6005 or Kernel-General 12 for start), or =boot_time= |
+| =input= | User input after a resume on an unlocked session | =eventlog= (a 507 wake reason), =win32= (=GetLastInputInfo=) | =detail=: the 507 reason, for =eventlog= |
+| =day_start= | A start the user typed or confirmed | =user= | =start=: the start as aware ISO 8601 UTC, rendered in local time by the viewer; =detail=: =flag= or =prompt= |
+| =note= | Free text, or a structured diagnostic | =collector=, =manual= | see below |
 
-A gap bounded by =lock=/=unlock= or =suspend=/=resume= is an absence. A span between a =collector_stop= and the next =collector_start= with no boundary events is collector downtime, a different fact, never rendered as presence or absence.
+Sources added in phase 3: =wts= (a live session notification), =probe= (an =OpenInputDesktop= reconciliation or the startup probe), =power= (a live power broadcast), =clock= (a clock-jump inference with no covering log record), =logon= (the session logon time), =user= (a start the user typed or confirmed). =eventlog= covers both the System log and =Microsoft-Windows-Winlogon/Operational=; =win32= keeps its phase 2 meaning. The change is additive: phase 2 shards stay valid at schema version 1 without migration.
+
+Winlogon/Operational 811 =Sens= records map onto =lock= and =unlock= with no new event type: =Event= 5 (unlock) and 2 (logon) become =unlock=, =Event= 4 (lock) and 3 (logoff) become =lock=, source =eventlog=, with the channel and the code in =detail=.
+
+Structured =note= kinds. Replay reads only the =data= fields of a structured note, never its text.
+
+| =kind= | Fields | Written |
+|---|---|---|
+| =coverage= | =span_start=, =span_end= (ISO 8601 UTC); =system_readable=, =system_reaches_back=, =winlogon_readable=, =winlogon_reaches_back= (each =true= or =false=) | With every backfill (section 8). A channel reaches back when its oldest record is no later than =span_start=. A missing or non-boolean field makes the note unreadable to replay, which then treats the span as uncovered. |
+| =wts_only= | none beyond =kind= | Once at collector start when Winlogon/Operational is unreadable: lock and unlock times are live only for this run |
+
+** Transitions only
+
+The ledger records transitions only. The collector ticks every 30 seconds (=collector.tick=), but a tick writes nothing to the ledger; it overwrites the checkpoint file (section 3), which is state, not ledger. =collector_start= and =collector_stop= bound the collector's observation, not the user's presence. An edge the collector could not observe directly is written with confidence =inferred=: a stop recovered from a leftover checkpoint (reason =unclean=, accurate to one tick), a sleep boundary from a clock jump with no covering log record (source =clock=), a session state from the probe.
+
+Presence, absence and downtime are derived by replay (section 6), never written. A span the collector did not observe is reconstructed from the event logs when both cover it (section 8) and is collector downtime only where neither does: a different fact, never rendered as presence or absence.
 
 ** Writes and replay
 
-Append with =O_APPEND=, flush and =os.fsync= per write. Malformed lines on read are skipped, counted and logged, never fatal. The whole ledger replays into memory on start; per host, each =collector_start= pairs with the next =collector_stop= into a presence interval, and a start followed by another start with no stop between is kept as an unclosed interval rather than guessed. No database. The ability to fix a line with a text editor is a feature, and =te edit= exists so that it is never necessary.
+Append with =O_APPEND=, flush and =os.fsync= per write. Malformed lines on read are skipped, counted and logged, never fatal. The whole ledger replays into memory on start into the typed timeline of section 6. Repeated =eventlog= records, which recovery may append twice after a crash, deduplicate on channel, full-precision =TimeCreated= and code. No database. The ability to fix a line with a text editor is a feature, and =te edit= exists so that it is never necessary.
 
 
 * 6. Presence Detection
 
-The machine sleeps five minutes after the screen turns off, three on battery. Almost every real absence is therefore a sleep event, and Windows records sleep more precisely than anything else available without elevation.
+Phase 2 taught that collector liveness is not user presence. A Modern Standby dark wake on 26 September 2026 at 07:50 ran the collector on a machine nobody was sitting at and was recorded as presence, and over the step 0 window 22.8 % of the collector's running time fell while the session was locked, because the collector keeps ticking through the screen-off phase of Modern Standby. Presence is therefore credited on user evidence, never on the collector being alive.
 
-| Tier | Mechanism | Platform | Confidence |
-|---|---|---|---|
-| 1 | Monotonic clock versus wall clock jump per tick | All | =inferred=, one-tick resolution |
-| 2 | Power-Troubleshooter Event ID 1, System log: exact sleep and wake times, readable by a normal user | Windows | =observed= |
-| 2 | Kernel-Power 42 and 107 as corroboration | Windows | =observed= |
-| 2 | =OpenInputDesktop= via =ctypes=, polled, for lock without sleep | Windows | =observed= |
-| 2 | D-Bus =org.gnome.ScreenSaver.ActiveChanged= plus =org.freedesktop.login1.PrepareForSleep= | Fedora | =observed= |
-| none | Termux | Falls back to tier 1 |
+** The presence model
 
-Tier 1 raises the flag; tier 2 supplies the boundaries. Foreground window and input idle time are never read. Backends are a registry probed at startup.
+Replay derives three independent facts for every instant:
+
+| Fact | States |
+|---|---|
+| Machine | awake, asleep, off, unknown |
+| Session | unlocked, locked, unknown |
+| Observation | observing, not observing |
+
+*Present means awake, unlocked and evidenced.* Evidence opens presence; evidence never closes it.
+
+| Opens presence | Closes presence |
+|---|---|
+| =unlock= (session notification, Winlogon/Operational record, or probe) | =lock= |
+| Session logon time, if it falls on the current local day | =suspend= |
+| User input after a resume, on a session that was already unlocked: a Kernel-Power 507 with reason 31, 32, 15 or 1, or otherwise =GetLastInputInfo= | A deliberate =collector_stop= (=stop_file=, =signal=, =console_close=, and the test-only =max_ticks=): closed until the next =collector_start=, never reconstructed. A =session_end= stop closes presence but its gap is reconstructed like any other |
+| | Loss of observation that neither the System log nor the Winlogon/Operational log covers: a channel unreadable, a gap beyond retention, or a run in WTS-only mode. A gap both logs cover is reconstructed from them (section 8) and closes nothing by itself |
+
+A =resume= opens nothing: it moves the machine to awake and leaves the session as it was. On a locked session that is =away=; on an unlocked one it is =unevidenced= until an =input= or =unlock= arrives.
+
+** Idle is never absence
+
+The operating system's power policy is the idle detector: no input turns the screen off, then sleeps and locks the machine, and video playback holds the display awake so a two-hour course does not trigger it. The tracker reads the lock and sleep that policy produces and never runs an idle timer of its own. A two-hour meeting without locking is presence.
+
+Input is read only to open presence after a resume on an unlocked session: from the terminal 507's wake reason when it is 31 (Input Keyboard), 32 (Input Mouse), 15 (Lid) or 1 (Power Button), as an =input= event at the 507's own time, source =eventlog=; and from =GetLastInputInfo= only when the 507 reason is none of those or no 507 is found, read once per tick while the derived state is awake, unlocked and unevidenced, and not again until the next resume. Reasons 55 (Austerity Battery Drain Budget Exceeded), 20 (Sleep, Hibernate, or Shutdown) and 28 (AC/DC Display Burst Suppressed) are not input. =LASTINPUTINFO.dwTime= and =GetTickCount= are 32-bit and wrap after about 49.7 days, so they are compared with unsigned 32-bit subtraction. Input is never read to close presence and never used to measure idle time. This amends the phase 2 version of this section, which said "foreground window and input idle time are never read": the foreground window is still never read, and input is read once, as positive evidence, under the condition above. On the work laptop at step 0, 5 of 228 resumes in 21 days landed on an unlocked session, all after short standbys before the deferred lock.
+
+** The typed timeline
+
+Replay emits non-overlapping intervals:
+
+| Interval | Meaning |
+|---|---|
+| =present= | Awake, unlocked, evidenced |
+| =away= | Awake and locked. A dark wake inside a locked night lands here |
+| =asleep= | Machine suspended, boundaries observed or inferred |
+| =off= | Machine shut down or rebooting |
+| =unevidenced= | Awake and unlocked with no evidence yet: a resume on an unlocked session before any input |
+| =downtime= | Collector not observing. State unknown, never rendered as presence or absence |
+
+Every interval carries =confidence= (=observed= or =inferred=) from its boundary events; an interval inside a reconstructed gap is =inferred=. Adjacent intervals of the same type and confidence merge. Zero-length intervals are dropped. Intervals are stored and derived in UTC and split at local midnight only for day views, never in storage. A DST change (25 October 2026) moves no stored timestamp.
+
+Legacy days. Phase 2 shards carry no lock, unlock, suspend or resume events and replay reads them without error. A legacy =collector_stop= with reason =suspended= followed by =collector_start= with reason =resumed= is read as an inferred =suspend= and =resume=. Legacy collector liveness with no session events becomes =unevidenced=, never =present=.
+
+** Timestamp authority
+
+=eventlog= is the authority over every live or inferred source, for the session and for the machine alike. They pair by sequence, not by time:
+
+- Session: a =wts=, =logon= or =probe= transition matches the =eventlog= transition of the same kind (=lock= or =unlock=) with no opposite transition between them in session order.
+- Machine: a =power= or =clock= transition matches the =eventlog= transition of the same kind (=suspend= or =resume=) with no opposite transition between them in machine order. A =power= resume with no =power= suspend before it, because the suspend broadcast was missed, still pairs with its =eventlog= resume.
+
+A matched pair yields one boundary at the =eventlog= time; an unmatched transition keeps its own time. This is what places a lock that happened during standby, which WTS delivers only at the next wake, at its real time, and a resume at its 507 rather than at the moment the broadcast was received. Both pairs of a sleep are written to the ledger; replay keeps one. Repeated =eventlog= records deduplicate on channel, full-precision =TimeCreated= and code.
+
+** Sources on Windows
+
+Every source here is readable by a normal user. =te= never requires elevation, and no source that needs admin enters the design: the Security log (4800 and 4801, lock and unlock), =powercfg /sleepstudy=, and anything else that does are excluded. The work laptop at step 0 uses Modern Standby (S0 Low Power Idle, Network Connected), S3 unavailable, hibernation available.
+
+| Signal | Source | Role |
+|---|---|---|
+| =WM_WTSSESSION_CHANGE= lock and unlock | =wts= | Live signal, stamped at receipt |
+| Winlogon/Operational 811 =Sens= | =eventlog= | Lock and unlock timestamp authority when both exist, and the sole source on recovery |
+| =WM_POWERBROADCAST= suspend and resume | =power= | Live signal |
+| System log Kernel-Power 506 and 507, Power-Troubleshooter 1, Kernel-General 1 | =eventlog= | Exact sleep boundaries |
+| System log EventLog 6005 and 6006, Kernel-General 12 and 13 | =eventlog= | Boot and shutdown boundaries |
+| =OpenInputDesktop= | =probe= | Reconciliation only |
+| =WTSQuerySessionInformation= logon time | =logon= | Startup only |
+| Clock jump | =clock= | Fallback when no log record covers a sleep |
+
+Sleep boundaries, System log:
+
+- Sleep entry and exit are Kernel-Power 506 (entering Modern Standby) and 507 (exiting it), with their =Reason=. A 507 followed by a 506 within 2 seconds is a chain step, not a wake, and the chain collapses: =suspend= at the first 506 of the chain, =resume= at the terminal 507. At step 0, 50 of 278 exits were chain steps, among them every Austerity exit.
+- A hibernate wake takes its time from Power-Troubleshooter 1 =WakeTime=, or from Kernel-General 1 with Reason 2 (=NewTime=) when no Power-Troubleshooter 1 exists. Power-Troubleshooter 1 is written only for hibernate wakes on this machine (4 records in 21 days, one per hibernation, none for a Modern Standby wake), so it is partial and cannot carry ordinary boundaries. Kernel-Power 42 marks hibernation entry.
+- Kernel-Power 107's timestamp is never used: it is written at the real resume but stamped with the clock frozen at hibernation entry.
+- Kernel-Power 566 is ignored. It carries the same numeric reason as the 506 or 507 beside it, but its message table names the numbers differently (12 renders as SessionUnlock, 32 as InputHid), and it says nothing about the session lock.
+
+Lock and unlock, Winlogon/Operational:
+
+- 811 with =SubscriberName= =Sens=, filtered to the current user's SID from =Security UserID=: =Event= 4 and 3 read as =lock=, 5 and 2 as =unlock=. The mapping is inferred from the record shape, not rendered by Windows: at step 0, 4 and 5 alternated strictly (0 violations in 485), 241 of 242 unlocks followed a Windows Hello sign-in within 2 seconds, and 2, 3 and 12 sat at every boot and logoff. It is pinned by a fixture test and confirmed by a live Win+L check before the collector reads the channel.
+- The channel is 1 MB circular. On the work laptop at step 0 that is about 35 days, about 70 records per day. A gap older than the oldest record is beyond retention and cannot be reconstructed.
+- A lid close on an unlocked session locks 197 to 448 seconds later (about 290 typical), during standby, not at the close.
+
+Probe and startup:
+
+- =OpenInputDesktop= is a reconciliation probe, not the primary signal. It reports state, not transitions, and has no timestamp of its own; and the UAC secure desktop also makes it fail, so a single failure is not a lock. Each tick it is compared with the last known session state in the checkpoint; a disagreement that persists for two consecutive ticks writes the missing transition, source =probe=, =inferred=.
+- At collector start the current session state is recorded. If unlocked and the session logon time falls on the current local day, =unlock= source =logon= at the logon time; otherwise =unlock= source =probe= at the start time, =inferred=.
+- Startup self-check: each channel is queried once. If Winlogon/Operational is unreadable, the run is WTS-only: logged, one =wts_only= note written, and the collector carries on. If the System log is unreadable, sleep boundaries fall back to the clock-jump path. Neither failure stops the collector, and neither asks for elevation.
+
+** Backends
+
+Backends are a registry probed at startup, and Windows-only modules are imported lazily behind it. Windows is the only live backend in phase 3. The Fedora backend (D-Bus =org.gnome.ScreenSaver.ActiveChanged= and =org.freedesktop.login1.PrepareForSleep=) is deferred because it cannot be live-checked on the work laptop; the registry leaves room for it (section 18). A platform without a backend, Termux included, falls back to the clock-jump path and returns no log records.
 
 
 * 7. Absence Classification
@@ -250,26 +366,36 @@ The queue is non-blocking, retained indefinitely, and shown as a single count. =
 
 * 8. Recovery
 
-Phase 2's checkpoint recovery (section 3) owns collector death and suspend, at tick resolution: a leftover checkpoint becomes an inferred =collector_stop= with reason =unclean=, and a clock jump becomes an inferred =collector_stop= with reason =suspended= followed by =collector_start= with reason =resumed=. Phase 3 does not detect suspend independently. It refines the edges of those gaps with event-log timestamps, replacing tick-resolution boundaries with observed ones.
+Recovery works against the checkpoint file (section 3), which holds the last tick's timestamp, the last known session state, any pending gap and the Winlogon/Operational cursor. Every gap in observation is resolved against the System and Winlogon/Operational logs; tick-resolution boundaries survive only where the logs say nothing.
 
-On collector start, read the tail of this host's shard.
+Gaps and how they arise:
 
-| Last event | Meaning | Action |
-|---|---|---|
-| =collector_stop= with reason =unclean= or =suspended= | Unclean, recovered at tick resolution | Classify the gap from that timestamp to the next =collector_start= |
-| =collector_stop=, any other reason | Clean shutdown | No gap |
-| =collector_start=, =lock=, =suspend= | Unclean, no checkpoint recovered | Classify the gap from that timestamp to now |
-| Nothing today | First run | Normal start resolution |
+| Situation | Detected by | Gap | Action |
+|---|---|---|---|
+| Clock jump while running | More than twice the tick since the previous tick | Previous tick to now | Pending gap, resolved against the System log (below) |
+| =resume= notification while running | =WM_POWERBROADCAST= | The matching =suspend= to the resume | Write the =power= =resume= at receipt; pending gap, as above |
+| Leftover checkpoint at start | The checkpoint exists | Checkpoint timestamp to this start | Write =collector_stop= at the checkpoint, =inferred=, reason =unclean= (unchanged from phase 2); resume any pending gap it holds; backfill |
+| Last stop =session_end= | The shard's last =collector_stop= | That stop to this start | Backfill and reconstruct |
+| Last stop deliberate: =stop_file=, =signal=, =console_close=, =max_ticks= | The shard's last =collector_stop= | That stop to this start | No backfill, no reconstruction; presence stays closed until the next =collector_start= |
+| No events on this host | Empty shard | none | Normal start resolution (section 4) |
 
-Gap classification, rules in order, prompt only if none matches:
+Deliberate stops, from the code: =stop_file= is written only by =te collect stop=. =signal= (SIGINT or SIGBREAK, SIGTERM off Windows) and =console_close= can only reach a collector running in a terminal, since the background collector runs under =pythonw.exe=, detached, with no console and every stream on =DEVNULL=; a Task Manager kill writes no stop at all and is recovered as =unclean=. =max_ticks= is test-only and treated the same. When the Fedora backend arrives, =signal= is revisited: systemd sends SIGTERM at shutdown, which is not intent.
 
-1. Power-Troubleshooter 1 covers the gap. *Machine slept.* Backfill =suspend= and =resume= at the exact times, =observed=. No prompt.
-2. =boot_time()= inside the gap. *Machine was off.* Record =offline=, source =reboot=. No prompt.
-3. Gap under =micro=. *Collector restarted.* Fold silently.
-4. Gap opens with a =lock=. *Ordinary absence.* Section 7 applies.
-5. None of the above. *Collector downtime while unlocked.* Queue it. Unresolved gaps are =unknown= and *excluded from accrual until answered*. Unobserved time is not credited.
+Pending sleep gaps. The System log record can lag the wake, so a pending gap lives in the checkpoint and is retried each tick for two minutes. A covering record writes =suspend= and =resume= at the exact logged times, source =eventlog=, =observed=: =suspend= at the first 506 of the collapsed chain, =resume= at the terminal 507, or for a hibernate wake at the Power-Troubleshooter 1 =WakeTime=, or the Kernel-General 1 Reason 2 time when no Power-Troubleshooter 1 exists; never at a Kernel-Power 107 timestamp. No record within two minutes writes them at the checkpoint and the detected wake time, source =clock=, =inferred=. A pending gap survives a crash because it lives in the checkpoint. The =eventlog= pair is written even when =power= notifications already wrote theirs: both stay in the ledger, and replay pairs them by sequence with =eventlog= as the authority (section 6), so each sleep yields one =suspend= and one =resume= boundary at the logged times.
 
-The prompt for case 5, non-blocking, drained on =c=:
+Lock and unlock reconciliation. Each tick, Winlogon/Operational 811 =Sens= records since the checkpoint's cursor are appended as =lock= or =unlock= (section 5), source =eventlog=, =observed=, at their logged times. The cursor moves only after the append, so a crash can repeat a record but never lose one; replay deduplicates. Skipped entirely in a WTS-only run.
+
+Backfill, every gap. For every gap that is not deliberate, the System and Winlogon/Operational records inside it are appended as above: =suspend= and =resume=, =boot= from EventLog 6005 and 6006 and Kernel-General 12 and 13, =lock= and =unlock=. This always runs and is not one of the rules below. With it, recovery appends one =coverage= note (section 5) giving the span and, per channel, whether it was readable and reaches back to the span's start, so replay stays pure and reads coverage from those fields.
+
+Reconstruction. When both channels were readable and both reach back to the start of the gap, the gap is reconstructed from them: the state before the gap carries through unless a backfilled record changes it, and every interval inside the gap is =inferred=. No =downtime= is emitted for it.
+
+Downtime, only where neither log covers. For the stretches the backfill cannot cover (a channel unreadable, the gap beyond retention, a WTS-only run), rules in order:
+
+1. =boot_time()= falls inside the stretch. *Machine was off.* Write =boot= and mark the stretch =off= up to it, =inferred=.
+2. The stretch is shorter than =absence.micro_max=. *Collector restarted.* Fold silently.
+3. Otherwise. *Collector downtime.* Leave it as =downtime=. Phase 4 queues downtime while unlocked as =unknown=, *excluded from accrual until answered*. Unobserved time is not credited.
+
+The prompt for downtime, non-blocking, drained on =c= (phase 4):
 
 #+begin_src text
 14:02 to 14:31, 29m. The ledger stopped watching and will not pretend otherwise.
@@ -333,7 +459,7 @@ Sequence on trigger: countdown panel, one permitted postponement, then =manual_e
 
 =SetSuspendState= hibernates instead of sleeping whenever hibernation is enabled, regardless of its first argument. Startup runs =powercfg /a= and warns if hibernation is available; the fix is =powercfg /h off= once.
 
-Sleep initiated by the user or by the idle policy needs no handling. The collector freezes mid-tick and recovery (section 8, rule 1) backfills the exact boundaries from the event log on resume.
+Sleep initiated by the user or by the idle policy needs no handling. The collector freezes mid-tick and recovery (section 8, pending sleep gaps) writes the exact boundaries from the event log on resume.
 
 
 * 11. Calendar
@@ -493,7 +619,7 @@ Each phase is one implementation session and leaves the program working. No phas
 | 0 | Migrate =_legacy.py= into the package, fix all ten defects, =Clock= protocol, pack loader, =theme.py=, tests for the phase resolver, delete =_legacy.py= | Same behaviour, correct, structured |
 | 1 | Config, schedule builder, resolver, =--at= and =--speed=, new hours, day flags | Working tracker, no ledger |
 | 2 | Collector, checkpoint tick, clock-jump suspend inference, shards, replay, lockfile, platform dirs, logging, startup script, control handler | Persistence |
-| 3 | Sleep and lock detection, monotonic jump, event log, recovery | Absences are real |
+| 3 | Lock and unlock detection (WTS, Winlogon/Operational, probe), sleep and wake detection (power broadcasts, System log), clock jump reconciled against the System log, recovery and backfill after an unclean stop, presence on user evidence, typed timeline in replay, day start detection with a persisted typed start, =te collect timeline=. Windows only, never elevated; no absence classes, balances, calendar or power actions | Absences are real |
 | 4 | Flex balances, calendar, leave, drift, recovery estimate, classification rules and queue | The 37h answer |
 | 5 | Power module, countdown, postponement, =z=, hibernation check | The original purpose |
 | 6 | =te stats=, histograms, =s= key | The Fabric-shaped part |
@@ -524,6 +650,25 @@ Corrections are appended, never rewritten in place. A correction is a =void= or 
 |---|---|
 | Hostnames and profiles for the gaming rig and the Fedora box | Self-answerable, fill =[profiles.hosts]= |
 | Old GitHub repository holding the 600-line version | Archive it |
+| Fedora D-Bus backend (=org.gnome.ScreenSaver.ActiveChanged=, =org.freedesktop.login1.PrepareForSleep=) | Deferred: cannot be live-checked on the work laptop. The backend registry leaves room for it. Revisit =signal= as a deliberate stop when it arrives (section 8) |
+| Holiday exclusion in ={remaining_week}= | Waiting for phase 4 (calendar) |
+| Ledger backup | Undecided: destination and mechanism |
+| Teams presence | Decided in design, built in phase 5; rules below |
+
+** Teams presence
+
+Decided in design, built in phase 5.
+
+- On the first presence-opening event of a day (section 6) for the work profile: a free day (weekend, =helligdag=, =ferie=, =sygdom=, a full day of =afspadsering=, =fri=) stops the Teams process if it is running, and a working day starts it if it is not.
+- A =sick= flag set during the day stops it then.
+- A partial-day leave entry does nothing.
+- Each direction acts at most once per day, so a Teams the user restarts or stops by hand is never fought.
+- The action is written to the diagnostic log, not the ledger.
+- Process name (=ms-teams=) and launch identifier (=MSTeams_8wekyb3d8bbwe!MSTeams=, the standard AppID for the new Teams, launched as =shell:AppsFolder\<AppID>=) are config defaults, overridable locally.
+- The stop and start cycle was verified by hand on 2 October 2026, with both processes restarted within two seconds of the start command.
+- No-op off Windows and off the work profile.
+
+Rejected: synthetic keystrokes, which are fragile and would forge the tracker's own input evidence. Microsoft Graph =setUserPreferredPresence= stays an alternative only if the tenant allows a personal app registration.
 
 
 * 19. Conventions for the Implementing Agent

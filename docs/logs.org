@@ -28,6 +28,38 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-07, release v0.2.2 and the prod/dev split
+
+*Asked:* separate a prod install of =te= (a uv tool from a release tag, started at logon) from dev (this repository's venv), so dev never touches the real ledger. The first real install, =uv tool install= from the =v0.2.1= tag, failed to build, so the wheel was fixed and released first.
+
+*Done:*
+
+v0.2.2 (=fix/wheel-build=, PR #1):
+- The wheel build failed with "A second file is being added to the wheel archive at the same path: =timeexisting/assets/ascii_art/break_afternoon.txt=". =[tool.hatch.build.targets.wheel] packages= already ships every non-ignored file under =src/timeexisting=, and a =force-include= of the assets added them a second time. The =force-include= table is removed; no file moved. The wheel has 71 entries, no duplicates, the 16 art files, 10 content packs and the config defaults once each.
+- Version 0.2.2. It is static in =pyproject.toml= and derived from nothing; the =v0.2.1= tag had carried =0.1.0=. Tags and the version match only if the version is bumped by hand before tagging.
+- =pywin32= moved from the =windows= extra into the main dependencies with =sys_platform == 'win32'=, so a plain install on Windows brings it. The =windows= extra is removed: its only other package, =windows-toasts=, is imported nowhere yet and returns with notifications in phase 8. README, =docs/structure.org=, CI and =install-startup.ps1= say =.[dev]=.
+- CI builds the wheel and runs =te --help= from it in a clean environment (=uvx --isolated=) on Ubuntu and Windows, and runs on pull requests targeting =master=.
+- Verified locally: wheel built, installed into a throwaway uv venv with no extra, =pywin32= 312 installed, =te --help= exit 0, =win32gui=, =win32evtlog= and =session_win32= import.
+
+Prod/dev split (=chore/prod-dev-split=):
+- =scripts/dev-setup.ps1= writes =timeexisting_devstate.pth= into the venv's site-packages, resolved from the venv's own =python.exe=. It sets =TIMEEXISTING_STATE_DIR= and =TIMEEXISTING_CONFIG_DIR= with =os.environ.setdefault= to =.devstate\state= and =.devstate\config= in the repository, so every interpreter the venv starts, activated or not, uses dev state, and an explicit value (every test sets one) still wins. Idempotent: a second run reports the file unchanged; a stale file is rewritten. =-Venv= for testing, =-Uninstall=, =-WhatIf=. =.devstate/= is ignored.
+- =scripts/install-startup.ps1= targets prod only: =<uv tool dir>\timeexisting\Scripts\pythonw.exe= with =-m timeexisting collect=, working directory =%USERPROFILE%=. It refuses if uv or that file is missing, and replaces the shortcut of the same name, so the old dev shortcut is overwritten and exactly one collector starts at logon.
+- Tests: =tests/test_dev_setup.py= (8) against a throwaway venv and a copied script; =tests/test_install_startup.py= (9) against a temporary Startup folder and a fake =uv= on PATH. Neither script was run against the real Startup folder, the real venv or real state, and no collector was stopped or started.
+- README: Prod and Dev sections under Install.
+
+*Decided:*
+1. Dev isolation through a =.pth= file, not shell activation: activation misses =te.exe= run by path, IDE runs and spawned collectors. No dot-sourced shell helper.
+2. The Startup shortcut is prod only. No dev shortcut, no =-Target= parameter.
+3. Never set either override as a persistent user or system variable, or prod would follow it.
+
+*Rejected:* editing the venv's =Activate.ps1= (overwritten when the venv is recreated, and =deactivate= would not unset the variables); pointing the shortcut at =te.exe=, a console launcher that would flash a window at every logon.
+
+*Observed:*
+- Editable installs (=pip install -e=) never build the real wheel, which is why CI and the dev venv both missed the duplicate assets until the first real install.
+- uv venvs on Windows ship =pythonw.exe= beside =python.exe=, so =spawn.py= finds it in a uv tool environment as it does in the venv.
+
+*Carried over:* prod v0.2.2 is installed as a uv tool (7 October). Switch the daily collector to prod: stop the venv-launched collector with the prod =te= (=te collect stop=), run =scripts\install-startup.ps1=, then start =te= from a shell without the venv. Then run =scripts\dev-setup.ps1= in the dev venv.
+
 ** 2026-10-06, phase 3 step 0: evidence inventory
 
 *Asked:* step 0 of =docs/phase-3-prompt.md=, read-only. Establish which Windows records carry sleep, wake, lock and unlock boundaries on the work laptop, lay them against the ledger, and resolve the two reference cases (26 September dark wake, 2 October start). Aggregates only, then stop for decisions.

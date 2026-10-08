@@ -57,20 +57,41 @@ The full specification is =docs/timeexisting-roadmap.org=: that file is the cont
 
 Python 3.14 or later. Windows with PowerShell 7 is the primary platform, and the only one with session-end handling and the Startup shortcut. Linux is secondary and supported for tracking.
 
+There are two installs, and they never share data. Prod is the one you use: a uv tool installed from a release tag, started at logon, reading the real config and ledger. Dev is this repository's venv, and it never touches the real ledger.
+
+** Prod
+
+Install from a release tag with [[https://docs.astral.sh/uv/][uv]], then create the Startup shortcut once (=-WhatIf= to preview, =-Uninstall= to remove):
+
+#+begin_src powershell
+uv tool install git+https://github.com/gsaronni/timeexisting@v0.2.2
+te --help
+pwsh scripts\install-startup.ps1
+#+end_src
+
+The shortcut runs the tool's own =pythonw.exe= with =-m timeexisting collect=, from your profile folder, so exactly one collector starts at logon and nothing depends on a checkout. Running the script again replaces the shortcut.
+
+To upgrade, stop the running collector first, then install the newer tag over the old one, then start =te=, which starts the new collector. A running =pythonw.exe= locks its files on Windows, so installing first can fail halfway through replacing them. Run these from a shell without the dev venv activated, or =te= is the dev one and stops only the dev collector:
+
+#+begin_src powershell
+te collect stop
+uv tool install --force git+https://github.com/gsaronni/timeexisting@<tag>
+te
+#+end_src
+
+** Dev
+
 #+begin_src powershell
 git clone https://github.com/gsaronni/timeexisting.git
 cd timeexisting
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+pwsh scripts\dev-setup.ps1
 te --help
 #+end_src
 
-To start the collector at every logon, run this once (=-WhatIf= to preview, =-Uninstall= to remove):
-
-#+begin_src powershell
-pwsh scripts\install-startup.ps1
-#+end_src
+=scripts\dev-setup.ps1= writes a =.pth= file into the venv that sets =TIMEEXISTING_STATE_DIR= and =TIMEEXISTING_CONFIG_DIR= to =.devstate\state= and =.devstate\config= in the repository (ignored by git). It applies to every interpreter the venv starts, activated or not, including a collector the dev viewer spawns, so dev keeps its own config, ledger, lockfiles and logs, and its collector runs beside the prod one without seeing it. Run it again after recreating the venv. The rule: dev never touches the real ledger. Never set either variable as a persistent user or system variable, or prod would follow it.
 
 * Usage
 

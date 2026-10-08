@@ -19,3 +19,6 @@ htmlcov/
 !tests/fixtures/**/*.jsonl
 config.local.toml
 calendar.local.toml
+
+# Development config and state, set by scripts/dev-setup.ps1. Never the real ledger.
+.devstate/

@@ -1,10 +1,15 @@
 import random
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from timeexisting.ledger.events import Confidence, Event, EventType, Source
-from timeexisting.ledger.replay import Gap, Presence, Timeline, replay
+import pytest
 
+from timeexisting.ledger import store
+from timeexisting.ledger.events import Confidence, Event, EventType, Source, from_json, to_json
+from timeexisting.ledger.replay import Coverage, Gap, Presence, Timeline, read_coverage, replay
+
+_PHASE_2_SHARD = Path(__file__).parent / "fixtures" / "phase2-shard.jsonl"
 _T0 = datetime(2026, 9, 17, 6, 0, 0, tzinfo=UTC)
 _CPH = ZoneInfo("Europe/Copenhagen")
 
@@ -197,3 +202,160 @@ def test_a_run_across_the_autumn_fall_back_stays_ordered_in_utc():
     ]
     (gap,) = timeline.gaps
     assert gap.end - gap.start == timedelta(minutes=30)
+
+
+def _note(data: dict[str, str], event: EventType = EventType.NOTE) -> Event:
+    return Event.new(
+        ts=_at(0), host="laptop", profile="work", event=event, source=Source.COLLECTOR, data=data
+    )
+
+
+_COVERAGE = Coverage(
+    span_start=_at(-120),
+    span_end=_at(0),
+    system_readable=True,
+    system_reaches_back=True,
+    winlogon_readable=True,
+    winlogon_reaches_back=False,
+)
+
+
+def test_coverage_note_round_trips_through_the_ledger_line():
+    note = _note(dict(_COVERAGE.data()))
+    assert read_coverage(from_json(to_json(note))) == _COVERAGE
+
+
+def test_coverage_note_writes_the_spec_fields_as_strings():
+    assert dict(_COVERAGE.data()) == {
+        "kind": "coverage",
+        "span_start": "2026-09-17T04:00:00+00:00",
+        "span_end": "2026-09-17T06:00:00+00:00",
+        "system_readable": "true",
+        "system_reaches_back": "true",
+        "winlogon_readable": "true",
+        "winlogon_reaches_back": "false",
+    }
+
+
+def test_coverage_stamps_in_another_offset_are_read_as_utc():
+    data = dict(_COVERAGE.data()) | {"span_start": _at(-120).astimezone(_CPH).isoformat()}
+    coverage = read_coverage(_note(data))
+    assert coverage == _COVERAGE
+    assert coverage.span_start.tzinfo is UTC
+
+
+def test_coverage_reader_ignores_the_notes_text():
+    data = dict(_COVERAGE.data()) | {"text": "system unreadable, nothing reaches back"}
+    assert read_coverage(_note(data)) == _COVERAGE
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "span_start",
+        "span_end",
+        "system_readable",
+        "system_reaches_back",
+        "winlogon_readable",
+        "winlogon_reaches_back",
+    ],
+)
+def test_coverage_note_with_a_missing_field_is_rejected(field):
+    data = dict(_COVERAGE.data())
+    del data[field]
+    assert read_coverage(_note(data)) is None
+
+
+@pytest.mark.parametrize(
+    "field", ["system_readable", "system_reaches_back", "winlogon_readable", "winlogon_reaches_back"]
+)
+@pytest.mark.parametrize("value", ["True", "FALSE", "yes", "1", "0", ""])
+def test_coverage_note_with_a_non_boolean_field_is_rejected(field, value):
+    data = dict(_COVERAGE.data()) | {field: value}
+    assert read_coverage(_note(data)) is None
+
+
+@pytest.mark.parametrize("value", ["2026-09-17T04:00:00", "yesterday", ""])
+@pytest.mark.parametrize("field", ["span_start", "span_end"])
+def test_coverage_note_with_a_naive_or_unparseable_stamp_is_rejected(field, value):
+    data = dict(_COVERAGE.data()) | {field: value}
+    assert read_coverage(_note(data)) is None
+
+
+def test_coverage_note_whose_span_ends_before_it_starts_is_rejected():
+    data = dict(_COVERAGE.data()) | {"span_end": _at(-121).isoformat()}
+    assert read_coverage(_note(data)) is None
+
+
+def test_a_note_of_another_kind_is_not_coverage():
+    assert read_coverage(_note({"kind": "wts_only"})) is None
+    assert read_coverage(_note({"text": "free text"})) is None
+    assert read_coverage(_note({})) is None
+
+
+def test_coverage_fields_on_an_event_that_is_not_a_note_are_not_coverage():
+    assert read_coverage(_note(dict(_COVERAGE.data()), event=EventType.CLASSIFY)) is None
+
+
+def test_a_phase_2_shard_reads_without_a_malformed_line():
+    result = store.read_shard(_PHASE_2_SHARD)
+    assert result.malformed == 0
+    assert len(result.events) == 15
+    assert {event.event for event in result.events} == {EventType.COLLECTOR_START, EventType.COLLECTOR_STOP}
+
+
+def test_a_phase_2_shard_replays_to_the_phase_2_result():
+    def utc(day: int, hour: int, minute: int, second: int = 0) -> datetime:
+        return datetime(2026, 9, day, hour, minute, second, tzinfo=UTC)
+
+    host = "TEST-HOST"
+    timeline = replay(store.read_shard(_PHASE_2_SHARD).events)
+    assert timeline.presences == (
+        Presence(utc(21, 4, 55), utc(21, 9, 0), host, end_inferred=True),
+        Presence(utc(21, 9, 40), utc(21, 13, 30, 30), host, end_inferred=True),
+        Presence(utc(21, 13, 45), utc(21, 14, 30), host, end_inferred=False),
+        Presence(utc(22, 4, 58), utc(22, 5, 10), host, end_inferred=False),
+        Presence(utc(22, 5, 12), utc(22, 13, 0), host, end_inferred=False),
+        Presence(utc(22, 13, 5), utc(22, 13, 6), host, end_inferred=False),
+        Presence(utc(22, 13, 20), utc(22, 14, 0), host, end_inferred=False),
+        Presence(utc(23, 5, 1), None, host, end_inferred=False),
+    )
+    assert timeline.gaps == (
+        Gap(utc(21, 9, 0), utc(21, 9, 40), host, start_inferred=True, end_inferred=False, reason="suspended"),
+        Gap(
+            utc(21, 13, 30, 30),
+            utc(21, 13, 45),
+            host,
+            start_inferred=True,
+            end_inferred=False,
+            reason="unclean",
+        ),
+        Gap(
+            utc(21, 14, 30),
+            utc(22, 4, 58),
+            host,
+            start_inferred=False,
+            end_inferred=False,
+            reason="session_end",
+        ),
+        Gap(utc(22, 5, 10), utc(22, 5, 12), host, start_inferred=False, end_inferred=False, reason="signal"),
+        Gap(
+            utc(22, 13, 0),
+            utc(22, 13, 5),
+            host,
+            start_inferred=False,
+            end_inferred=False,
+            reason="console_close",
+        ),
+        Gap(
+            utc(22, 13, 6),
+            utc(22, 13, 20),
+            host,
+            start_inferred=False,
+            end_inferred=False,
+            reason="max_ticks",
+        ),
+        Gap(
+            utc(22, 14, 0), utc(23, 5, 1), host, start_inferred=False, end_inferred=False, reason="stop_file"
+        ),
+    )

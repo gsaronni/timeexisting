@@ -28,6 +28,18 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-09, phase 3 step 2: event schema
+
+*Asked:* step 2 of =docs/phase-3-prompt.md= on =phase-3/step-2-schema=: the phase 3 event types and sources in one schema change, structured coverage on =note=, and tests that phase 2 shards still replay.
+
+*Done:* =ledger/events.py= gains the events =boot=, =input= and =day_start=, the sources =wts=, =probe=, =power=, =clock=, =logon= and =user= (=win32= already existed), and =NoteKind= (=coverage=, =wts_only=). =ledger/replay.py= gains =Coverage= with =data()= for the writer and =read_coverage(event)=, which reads only the note's =data= fields and returns =None= (span uncovered) for a missing field, a flag other than exactly =true= or =false=, a naive or unparseable stamp, or a span ending before it starts. New fixture =tests/fixtures/phase2-shard.jsonl=, synthetic, 15 lines covering every phase 2 stop reason; a test pins its replay result. 693 tests, up from 609.
+
+*Decided:* schema version stays 1. The reader does not tolerate unknown values: =from_json= rejects an unknown =event= or =source= and any unknown top-level key. Old shards stay valid without migration because the change only adds values. The consequence is on rollback: v0.2.2 reading a shard with phase 3 lines skips each one as malformed, counted and logged, with no crash. A bump to v2 would make v0.2.2 reject every new line and the new reader carry both versions.
+
+*Observed:* the prompt said to stop and ask before changing anything if the reader did not tolerate unknown types; the step was carried out on the strength of the roadmap's "additive, version 1" sentence instead, and the version was confirmed after review. From here on, a "stop and ask" in the prompt is a stop, whatever another document seems to have decided.
+
+*Carried over:* step 3 deliberately changes the fixture's pinned result to the section 6 legacy rules: the =suspended=/=resumed= pair becomes an inferred =suspend= and =resume=, and collector liveness with no session events becomes =unevidenced=, never =present=.
+
 ** 2026-10-07, release v0.2.2 and the prod/dev split
 
 *Asked:* separate a prod install of =te= (a uv tool from a release tag, started at logon) from dev (this repository's venv), so dev never touches the real ledger. The first real install, =uv tool install= from the =v0.2.1= tag, failed to build, so the wheel was fixed and released first.

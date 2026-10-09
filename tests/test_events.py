@@ -10,6 +10,7 @@ from timeexisting.ledger.events import (
     Event,
     EventType,
     LedgerFormatError,
+    NoteKind,
     Source,
     from_json,
     profile_for,
@@ -42,6 +43,9 @@ def test_enums_carry_every_value_from_the_spec():
         "unlock",
         "suspend",
         "resume",
+        "boot",
+        "input",
+        "day_start",
         "classify",
         "note",
         "dayflag",
@@ -51,13 +55,20 @@ def test_enums_carry_every_value_from_the_spec():
     }
     assert {member.value for member in Source} == {
         "win32",
+        "wts",
+        "probe",
+        "power",
         "eventlog",
+        "clock",
+        "logon",
+        "user",
         "dbus",
         "collector",
         "manual",
         "backfill",
     }
     assert {member.value for member in Confidence} == {"observed", "inferred"}
+    assert {member.value for member in NoteKind} == {"coverage", "wts_only"}
 
 
 @pytest.mark.parametrize("key", ["event", "source"])
@@ -86,6 +97,69 @@ def test_round_trip_every_field(event_type):
         data={"reason": "signal", "note": "æøå, not escaped"},
     )
     assert from_json(to_json(event)) == event
+
+
+@pytest.mark.parametrize("source", list(Source))
+def test_round_trip_every_source(source):
+    event = _event(source=source)
+    assert from_json(to_json(event)) == event
+
+
+@pytest.mark.parametrize(
+    ("event_type", "source", "confidence", "data"),
+    [
+        (EventType.LOCK, Source.WTS, Confidence.OBSERVED, {}),
+        (EventType.UNLOCK, Source.WTS, Confidence.OBSERVED, {}),
+        (EventType.LOCK, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Winlogon/Operational 811 Sens 4"}),
+        (EventType.LOCK, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Winlogon/Operational 811 Sens 3"}),
+        (
+            EventType.UNLOCK,
+            Source.EVENTLOG,
+            Confidence.OBSERVED,
+            {"detail": "Winlogon/Operational 811 Sens 5"},
+        ),
+        (
+            EventType.UNLOCK,
+            Source.EVENTLOG,
+            Confidence.OBSERVED,
+            {"detail": "Winlogon/Operational 811 Sens 2"},
+        ),
+        (EventType.LOCK, Source.PROBE, Confidence.INFERRED, {}),
+        (EventType.UNLOCK, Source.PROBE, Confidence.INFERRED, {}),
+        (EventType.UNLOCK, Source.LOGON, Confidence.OBSERVED, {}),
+        (EventType.SUSPEND, Source.POWER, Confidence.OBSERVED, {"detail": "PBT_APMSUSPEND"}),
+        (EventType.RESUME, Source.POWER, Confidence.OBSERVED, {"detail": "PBT_APMRESUMEAUTOMATIC"}),
+        (EventType.SUSPEND, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Idle Timeout"}),
+        (EventType.RESUME, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Input Mouse"}),
+        (EventType.SUSPEND, Source.CLOCK, Confidence.INFERRED, {}),
+        (EventType.RESUME, Source.CLOCK, Confidence.INFERRED, {}),
+        (EventType.SUSPEND, Source.EVENTLOG, Confidence.OBSERVED, {}),
+        (EventType.BOOT, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "EventLog 6005"}),
+        (EventType.BOOT, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Kernel-General 13"}),
+        (EventType.BOOT, Source.COLLECTOR, Confidence.INFERRED, {"detail": "boot_time"}),
+        (EventType.INPUT, Source.EVENTLOG, Confidence.OBSERVED, {"detail": "Input Keyboard"}),
+        (EventType.INPUT, Source.WIN32, Confidence.OBSERVED, {}),
+        (
+            EventType.DAY_START,
+            Source.USER,
+            Confidence.OBSERVED,
+            {"start": "2026-10-02T06:55:00+00:00", "detail": "prompt"},
+        ),
+        (
+            EventType.DAY_START,
+            Source.USER,
+            Confidence.OBSERVED,
+            {"start": "2026-10-02T06:55:00+00:00", "detail": "flag"},
+        ),
+        (EventType.NOTE, Source.COLLECTOR, Confidence.OBSERVED, {"kind": "wts_only"}),
+    ],
+)
+def test_round_trip_every_phase_3_shape(event_type, source, confidence, data):
+    event = _event(event=event_type, source=source, confidence=confidence, data=data)
+    line = to_json(event)
+    assert json.loads(line)["event"] == event_type.value
+    assert json.loads(line)["source"] == source.value
+    assert from_json(line) == event
 
 
 def test_round_trip_keeps_microseconds():

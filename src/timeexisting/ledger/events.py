@@ -34,6 +34,9 @@ class EventType(StrEnum):
     UNLOCK = "unlock"
     SUSPEND = "suspend"
     RESUME = "resume"
+    BOOT = "boot"
+    INPUT = "input"
+    DAY_START = "day_start"
     CLASSIFY = "classify"
     NOTE = "note"
     DAYFLAG = "dayflag"
@@ -44,11 +47,24 @@ class EventType(StrEnum):
 
 class Source(StrEnum):
     WIN32 = "win32"
+    WTS = "wts"
+    PROBE = "probe"
+    POWER = "power"
     EVENTLOG = "eventlog"
+    CLOCK = "clock"
+    LOGON = "logon"
+    USER = "user"
     DBUS = "dbus"
     COLLECTOR = "collector"
     MANUAL = "manual"
     BACKFILL = "backfill"
+
+
+class NoteKind(StrEnum):
+    """The `kind` of a structured `note`. Replay reads a structured note's `data` fields, never its text; a note with no `kind` is free text."""
+
+    COVERAGE = "coverage"
+    WTS_ONLY = "wts_only"
 
 
 class Confidence(StrEnum):

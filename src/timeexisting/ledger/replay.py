@@ -3,11 +3,13 @@
 Pure. No clock, no I/O, no Rich: the caller reads the ledger and hands the events in. Nothing is classified here; a gap carries the reason its opening stop recorded and nothing more.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
-from timeexisting.ledger.events import Confidence, Event, EventType
+from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind
+
+_BOOLEANS = {"true": True, "false": False}
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,62 @@ class Timeline:
     events: tuple[Event, ...]
     presences: tuple[Presence, ...]
     gaps: tuple[Gap, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Coverage:
+    """What a structured `coverage` note says about a span in observation (roadmap section 5): whether the System log and Winlogon/Operational were readable, and whether each reaches back, meaning its oldest record is no later than `span_start`. Both stamps are aware UTC."""
+
+    span_start: datetime
+    span_end: datetime
+    system_readable: bool
+    system_reaches_back: bool
+    winlogon_readable: bool
+    winlogon_reaches_back: bool
+
+    def data(self) -> Mapping[str, str]:
+        """The note's `data` fields, as the collector writes them and `read_coverage` reads them back."""
+        return {
+            "kind": str(NoteKind.COVERAGE),
+            "span_start": self.span_start.astimezone(UTC).isoformat(),
+            "span_end": self.span_end.astimezone(UTC).isoformat(),
+            "system_readable": _flag(self.system_readable),
+            "system_reaches_back": _flag(self.system_reaches_back),
+            "winlogon_readable": _flag(self.winlogon_readable),
+            "winlogon_reaches_back": _flag(self.winlogon_reaches_back),
+        }
+
+
+def _flag(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _stamp(data: Mapping[str, str], key: str) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(data[key])
+    except KeyError, ValueError:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return None
+    return value.astimezone(UTC)
+
+
+def read_coverage(event: Event) -> Coverage | None:
+    """The coverage a `note` of kind `coverage` records, from its `data` fields only, never its text. `None` for any other event, and for a coverage note with a field missing, a flag that is not exactly `true` or `false`, a naive or unparseable stamp, or a span that ends before it starts: replay then treats the span as uncovered."""
+    if event.event is not EventType.NOTE or event.data.get("kind") != NoteKind.COVERAGE:
+        return None
+    data = event.data
+    span_start = _stamp(data, "span_start")
+    span_end = _stamp(data, "span_end")
+    if span_start is None or span_end is None or span_end < span_start:
+        return None
+    flags: dict[str, bool] = {}
+    for key in ("system_readable", "system_reaches_back", "winlogon_readable", "winlogon_reaches_back"):
+        value = _BOOLEANS.get(data.get(key, ""))
+        if value is None:
+            return None
+        flags[key] = value
+    return Coverage(span_start=span_start, span_end=span_end, **flags)
 
 
 @dataclass(slots=True)

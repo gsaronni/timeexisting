@@ -2,6 +2,8 @@
 
 `clock` and `sleep` are injected. Tick spacing and the suspend check are measured against the clock, never by counting sleeps, so a test runs hundreds of ticks instantly. Nothing here knows what day it is: the loop writes UTC timestamps, which is what makes midnight and a daylight-saving change non-events.
 
+At start the collector queries each event log channel once (`startup_check`). An unreadable Winlogon/Operational makes the run WTS-only, recorded as one `wts_only` note; an unreadable System log leaves the clock-jump path as the only source of sleep boundaries. Neither stops the collector.
+
 Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), `max_ticks`, and a session end or console close reported from another thread through the `Shutdown` handed to `on_start`. All of them go through that one idempotent `Shutdown`, so the first one wins and the rest do nothing. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
 """
 
@@ -22,7 +24,8 @@ from timeexisting.collector import lockfile
 from timeexisting.config.models import Config
 from timeexisting.domain.clock import Clock
 from timeexisting.ledger import store
-from timeexisting.ledger.events import Confidence, Event, EventType, Source, profile_for
+from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source, profile_for
+from timeexisting.presence.backend import ChannelCheck, EventLogReader
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,39 @@ def recover(host: str, profile: str) -> None:
     delete_checkpoint(host)
 
 
+def startup_check(event_log: EventLogReader, ts: datetime, host: str, profile: str) -> ChannelCheck | None:
+    """Query each event log channel once (roadmap section 6). If Winlogon/Operational is unreadable, the run is WTS-only: logged, and one `wts_only` note written at `ts`. If the System log is unreadable, logged; sleep boundaries stay on the clock-jump path. Returns what was found, or `None` when the platform has no event log or the check itself failed. Never raises, never asks for elevation."""
+    try:
+        channels = event_log.check()
+    except Exception:
+        logger.exception("event log self-check failed; carrying on without it")
+        return None
+    if channels is None:
+        logger.info("no event log on this platform: sleep boundaries from the clock-jump path only")
+        return None
+    if not channels.system:
+        logger.warning(
+            "System log unreadable: sleep boundaries fall back to the clock-jump path for this run"
+        )
+    if not channels.winlogon:
+        logger.warning("Winlogon/Operational unreadable: WTS-only run, lock and unlock times are live only")
+        store.append(
+            Event.new(
+                ts=ts,
+                host=host,
+                profile=profile,
+                event=EventType.NOTE,
+                source=Source.COLLECTOR,
+                confidence=Confidence.OBSERVED,
+                data={"kind": str(NoteKind.WTS_ONLY)},
+            )
+        )
+    logger.info(
+        "event log self-check: System %s, Winlogon/Operational %s", channels.system, channels.winlogon
+    )
+    return channels
+
+
 class Shutdown:
     """The one way a running collector stops cleanly: write `collector_stop` with the reason (fsynced by `store.append`), delete the checkpoint and the stop file, release the lock, and set the stop event so the loop exits.
 
@@ -177,10 +213,11 @@ def run_collector(
     max_ticks: int | None = None,
     stop_event: threading.Event | None = None,
     on_start: Callable[[Shutdown], object] | None = None,
+    event_log: EventLogReader | None = None,
 ) -> StopReason:
     """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, `max_ticks` ticks have run, or another thread calls the `Shutdown`. Returns the stop reason.
 
-    `on_start` receives that `Shutdown` once `collector_start` and the first checkpoint are on disk; the Windows session watchers hook in there. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
+    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`. `on_start` receives that `Shutdown` once `collector_start` and the first checkpoint are on disk; the Windows session watchers hook in there. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
     """
     stop_event = stop_event or threading.Event()
     host = paths.current_host()
@@ -192,7 +229,7 @@ def run_collector(
             logger.warning("removing a stop file left over from an earlier stop request")
             paths.stop_file().unlink(missing_ok=True)
         recover(host, profile)
-        reason = _loop(clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start)
+        reason = _loop(clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start, event_log)
         shutdown(reason)
         return shutdown.reason or reason
     except Exception:
@@ -212,12 +249,15 @@ def _loop(
     stop_event: threading.Event,
     shutdown: Shutdown,
     on_start: Callable[[Shutdown], object] | None,
+    event_log: EventLogReader | None,
 ) -> StopReason:
     tick = cfg.collector.tick
     previous = clock.now()
     _write(previous, host, profile, EventType.COLLECTOR_START, StartReason.LAUNCH, Confidence.OBSERVED)
     write_checkpoint(host, previous)
     logger.info("collector started on %s, tick %s", host, tick)
+    if event_log is not None:
+        startup_check(event_log, previous, host, profile)
     if on_start is not None:
         on_start(shutdown)
     ticks = 0

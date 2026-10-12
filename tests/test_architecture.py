@@ -22,7 +22,12 @@ _THEME_MODULE = _SRC_ROOT / "ui" / "theme.py"
 _ALL_MODULES = sorted(_SRC_ROOT.rglob("*.py"))
 _DOMAIN_MODULES = sorted((_SRC_ROOT / "domain").rglob("*.py"))
 # Modules held to the domain rules: no Rich, no clock, no I/O.
-_PURE_MODULES = [*_DOMAIN_MODULES, _SRC_ROOT / "ledger" / "events.py", _SRC_ROOT / "ledger" / "replay.py"]
+_PURE_MODULES = [
+    *_DOMAIN_MODULES,
+    _SRC_ROOT / "ledger" / "events.py",
+    _SRC_ROOT / "ledger" / "replay.py",
+    _SRC_ROOT / "presence" / "eventlog.py",
+]
 _MODULES_EXCEPT_CLOCK = [path for path in _ALL_MODULES if path != _CLOCK_MODULE]
 _MODULES_EXCEPT_THEME = [path for path in _ALL_MODULES if path != _THEME_MODULE]
 

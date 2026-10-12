@@ -1,0 +1,25 @@
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>
+  <System>
+    <Provider Name='Microsoft-Windows-Kernel-Power' Guid='{331c3b3a-2005-44c2-ac5e-77220c37d6b4}'/>
+    <EventID>42</EventID>
+    <Version>6</Version>
+    <Level>4</Level>
+    <Task>64</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8000000000000404</Keywords>
+    <TimeCreated SystemTime='2026-09-15T06:00:11.2500000Z'/>
+    <EventRecordID>1003</EventRecordID>
+    <Correlation/>
+    <Execution ProcessID='4' ThreadID='88'/>
+    <Channel>System</Channel>
+    <Computer>EXAMPLE-HOST</Computer>
+    <Security/>
+  </System>
+  <EventData>
+    <Data Name='TargetState'>5</Data>
+    <Data Name='EffectiveState'>5</Data>
+    <Data Name='Reason'>13</Data>
+    <Data Name='Flags'>0</Data>
+    <Data Name='TransitionsToOn'>9</Data>
+  </EventData>
+</Event>

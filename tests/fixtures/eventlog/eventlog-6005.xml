@@ -1,0 +1,21 @@
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>
+  <System>
+    <Provider Name='EventLog'/>
+    <EventID Qualifiers='32768'>6005</EventID>
+    <Version>0</Version>
+    <Level>4</Level>
+    <Task>0</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x80000000000000</Keywords>
+    <TimeCreated SystemTime='2026-09-14T06:58:10.0000000Z'/>
+    <EventRecordID>1008</EventRecordID>
+    <Correlation/>
+    <Execution ProcessID='4' ThreadID='88'/>
+    <Channel>System</Channel>
+    <Computer>EXAMPLE-HOST</Computer>
+    <Security/>
+  </System>
+  <EventData>
+    <Binary></Binary>
+  </EventData>
+</Event>

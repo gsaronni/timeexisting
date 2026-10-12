@@ -304,7 +304,7 @@ Legacy days. Phase 2 shards carry no lock, unlock, suspend or resume events and 
 - Session: a =wts=, =logon= or =probe= transition matches the =eventlog= transition of the same kind (=lock= or =unlock=) with no opposite transition between them in session order.
 - Machine: a =power= or =clock= transition matches the =eventlog= transition of the same kind (=suspend= or =resume=) with no opposite transition between them in machine order. A =power= resume with no =power= suspend before it, because the suspend broadcast was missed, still pairs with its =eventlog= resume.
 
-A matched pair yields one boundary at the =eventlog= time; an unmatched transition keeps its own time. This is what places a lock that happened during standby, which WTS delivers only at the next wake, at its real time, and a resume at its 507 rather than at the moment the broadcast was received. Both pairs of a sleep are written to the ledger; replay keeps one. Repeated =eventlog= records deduplicate on channel, full-precision =TimeCreated= and code.
+A matched pair yields one boundary at the =eventlog= time; an unmatched transition keeps its own time. This is what places a lock that happened during standby, which WTS delivers only at the next wake, at its real time, and a resume at its 507 rather than at the moment the broadcast was received. A =collector_stop= ends every run: no transition pairs with one on the other side of a stop, so a startup probe after a restart is never absorbed by a record from before it, while a record backfilled inside the gap still pairs with it. Both pairs of a sleep are written to the ledger; replay keeps one. Repeated =eventlog= records deduplicate on channel, full-precision =TimeCreated= and code.
 
 ** Sources on Windows
 

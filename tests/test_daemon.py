@@ -11,6 +11,7 @@ from timeexisting import paths
 from timeexisting.collector import daemon, lockfile
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source, profile_for
+from timeexisting.presence.backend import ChannelCheck
 
 _T0 = datetime(2026, 9, 17, 6, 0, 0, tzinfo=UTC)
 
@@ -423,3 +424,104 @@ def test_concurrent_shutdowns_write_one_stop(cfg):
 
     assert sorted(results) == [False] * 7 + [True]
     assert [reason for _, reason, _, _ in _summary()] == ["launch", "session_end"]
+
+
+class _FakeEventLog:
+    """An event log reader whose startup self-check answers `channels`, or raises when `channels` is an exception."""
+
+    def __init__(self, channels: ChannelCheck | Exception | None) -> None:
+        self.channels = channels
+        self.checks = 0
+
+    def check(self) -> ChannelCheck | None:
+        self.checks += 1
+        if isinstance(self.channels, Exception):
+            raise self.channels
+        return self.channels
+
+    def system_boundaries(self, _since: datetime, _until: datetime) -> list:
+        raise AssertionError("the collector reads no System records in step 4")
+
+    def session_records(self, _since: datetime) -> list:
+        raise AssertionError("the collector reads no Winlogon records before the step 5 live check")
+
+
+def _notes() -> list[Event]:
+    return [event for event in _ledger() if event.event is EventType.NOTE]
+
+
+def test_an_unreadable_winlogon_channel_writes_one_wts_only_note_after_the_start(cfg, caplog):
+    event_log = _FakeEventLog(ChannelCheck(system=True, winlogon=False))
+    with caplog.at_level(logging.WARNING, logger=daemon.__name__):
+        _run(cfg, _ManualClock(_T0), max_ticks=3, event_log=event_log)
+
+    assert event_log.checks == 1
+    assert [str(event.event) for event in _ledger()] == ["collector_start", "note", "collector_stop"]
+    (note,) = _notes()
+    assert dict(note.data) == {"kind": "wts_only"}
+    assert (note.ts, note.source, note.confidence) == (_T0, Source.COLLECTOR, Confidence.OBSERVED)
+    assert "WTS-only" in caplog.text
+
+
+def test_readable_channels_write_nothing(cfg):
+    event_log = _FakeEventLog(ChannelCheck(system=True, winlogon=True))
+    _run(cfg, _ManualClock(_T0), max_ticks=3, event_log=event_log)
+    assert event_log.checks == 1
+    assert _notes() == []
+
+
+def test_an_unreadable_system_log_is_logged_and_writes_nothing(cfg, caplog):
+    with caplog.at_level(logging.WARNING, logger=daemon.__name__):
+        _run(
+            cfg,
+            _ManualClock(_T0),
+            max_ticks=3,
+            event_log=_FakeEventLog(ChannelCheck(system=False, winlogon=True)),
+        )
+    assert _notes() == []
+    assert "clock-jump path" in caplog.text
+
+
+def test_both_channels_unreadable_write_one_note_and_the_collector_runs_on(cfg):
+    clock = _ManualClock(_T0)
+    reason = _run(
+        cfg, clock, max_ticks=3, event_log=_FakeEventLog(ChannelCheck(system=False, winlogon=False))
+    )
+    assert reason is daemon.StopReason.MAX_TICKS
+    assert clock.sleeps == 3
+    assert len(_notes()) == 1
+
+
+def test_no_event_log_on_this_platform_writes_nothing(cfg):
+    _run(cfg, _ManualClock(_T0), max_ticks=1, event_log=_FakeEventLog(None))
+    assert _notes() == []
+
+
+def test_a_failing_self_check_never_stops_the_collector(cfg, caplog):
+    clock = _ManualClock(_T0)
+    with caplog.at_level(logging.ERROR, logger=daemon.__name__):
+        reason = _run(cfg, clock, max_ticks=3, event_log=_FakeEventLog(RuntimeError("EvtQuery exploded")))
+    assert reason is daemon.StopReason.MAX_TICKS
+    assert clock.sleeps == 3
+    assert _notes() == []
+    assert "self-check failed" in caplog.text
+
+
+def test_the_self_check_runs_before_on_start(cfg):
+    order: list[str] = []
+    event_log = _FakeEventLog(ChannelCheck(system=True, winlogon=True))
+    original = event_log.check
+
+    def check() -> ChannelCheck | None:
+        order.append("check")
+        return original()
+
+    event_log.check = check
+    _run(
+        cfg,
+        _ManualClock(_T0),
+        max_ticks=0,
+        event_log=event_log,
+        on_start=lambda _shutdown: order.append("on_start"),
+    )
+    assert order == ["check", "on_start"]

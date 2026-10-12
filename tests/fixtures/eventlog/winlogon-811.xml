@@ -1,0 +1,22 @@
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>
+  <System>
+    <Provider Name='Microsoft-Windows-Winlogon' Guid='{dbe9b383-7cf3-4331-91cc-a3cb16a3b538}'/>
+    <EventID>811</EventID>
+    <Version>0</Version>
+    <Level>4</Level>
+    <Task>0</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x2000000000000000</Keywords>
+    <TimeCreated SystemTime='2026-09-15T06:02:30.4680000Z'/>
+    <EventRecordID>2001</EventRecordID>
+    <Correlation/>
+    <Execution ProcessID='700' ThreadID='900'/>
+    <Channel>Microsoft-Windows-Winlogon/Operational</Channel>
+    <Computer>EXAMPLE-HOST</Computer>
+    <Security UserID='S-1-5-21-1000000001-1000000002-1000000003-1001'/>
+  </System>
+  <EventData>
+    <Data Name='Event'>5</Data>
+    <Data Name='SubscriberName'>Sens</Data>
+  </EventData>
+</Event>

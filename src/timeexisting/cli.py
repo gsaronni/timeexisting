@@ -20,6 +20,7 @@ from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ledger import store
 from timeexisting.ledger.replay import Timeline, replay
+from timeexisting.presence import backend
 from timeexisting.ui.app import local_timezone, run, run_demo
 
 logger = logging.getLogger(__name__)
@@ -345,6 +346,7 @@ def _collect_run(cfg: Config) -> None:
                 cfg,
                 stop_event=stop_event,
                 on_start=_session_watch(),
+                event_log=backend.event_log(),
             )
     except (lockfile.AlreadyRunning, lockfile.LockError) as error:
         logger.warning("collector refused to start: %s", error)

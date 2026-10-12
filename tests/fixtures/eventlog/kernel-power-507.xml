@@ -1,0 +1,72 @@
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>
+  <System>
+    <Provider Name='Microsoft-Windows-Kernel-Power' Guid='{331c3b3a-2005-44c2-ac5e-77220c37d6b4}'/>
+    <EventID>507</EventID>
+    <Version>0</Version>
+    <Level>4</Level>
+    <Task>269</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8000000000000404</Keywords>
+    <TimeCreated SystemTime='2026-09-15T05:58:41.7654321Z'/>
+    <EventRecordID>1002</EventRecordID>
+    <Correlation/>
+    <Execution ProcessID='4' ThreadID='88'/>
+    <Channel>System</Channel>
+    <Computer>EXAMPLE-HOST</Computer>
+    <Security UserID='S-1-5-18'/>
+  </System>
+  <EventData>
+    <Data Name='EnergyDrain'>1200</Data>
+    <Data Name='ActiveResidencyInUs'>1000</Data>
+    <Data Name='NonDripsTimeActivatedInUs'>0</Data>
+    <Data Name='FirstDripsEntryInUs'>2000</Data>
+    <Data Name='DripsResidencyInUs'>3000</Data>
+    <Data Name='DurationInUs'>4000</Data>
+    <Data Name='DripsTransitions'>5</Data>
+    <Data Name='FullChargeCapacityRatio'>98</Data>
+    <Data Name='AudioPlaying'>false</Data>
+    <Data Name='Reason'>32</Data>
+    <Data Name='AudioPlaybackInUs'>0</Data>
+    <Data Name='NonActivatedCpuInUs'>0</Data>
+    <Data Name='PowerStateAc'>false</Data>
+    <Data Name='HwDripsResidencyInUs'>2500</Data>
+    <Data Name='ExitLatencyInUs'>100</Data>
+    <Data Name='DisconnectedStandby'>false</Data>
+    <Data Name='AoAcCompliantNic'>true</Data>
+    <Data Name='NonAttributedCpuInUs'>0</Data>
+    <Data Name='ModernSleepEnabledActionsBitmask'>0</Data>
+    <Data Name='ModernSleepAppliedActionsBitmask'>0</Data>
+    <Data Name='LidOpenState'>true</Data>
+    <Data Name='ExternalMonitorConnectedState'>false</Data>
+    <Data Name='ScenarioInstanceId'>7</Data>
+    <Data Name='IsCsSessionInProgressOnExit'>false</Data>
+    <Data Name='BatteryRemainingCapacityOnExit'>40000</Data>
+    <Data Name='BatteryFullChargeCapacityOnExit'>52000</Data>
+    <Data Name='ScenarioInstanceIdV2'>7</Data>
+    <Data Name='BootId'>3</Data>
+    <Data Name='InputSuppressionActionCount'>0</Data>
+    <Data Name='NonResiliencyTimeInUs'>0</Data>
+    <Data Name='ResiliencyDripsTimeInUs'>0</Data>
+    <Data Name='ResiliencyHwDripsTimeInUs'>0</Data>
+    <Data Name='GdiOnTime'>0</Data>
+    <Data Name='DwmSyncFlushTime'>0</Data>
+    <Data Name='MonitorPowerOnTime'>0</Data>
+    <Data Name='SleepEntered'>false</Data>
+    <Data Name='ScreenOffEnergyCapacityAtStart'>41000</Data>
+    <Data Name='ScreenOffEnergyCapacityAtEnd'>40500</Data>
+    <Data Name='ScreenOffDurationInUs'>1500</Data>
+    <Data Name='SleepEnergyCapacityAtStart'>40500</Data>
+    <Data Name='SleepEnergyCapacityAtEnd'>40000</Data>
+    <Data Name='SleepDurationInUs'>2500</Data>
+    <Data Name='ScreenOffFullEnergyCapacityAtStart'>52000</Data>
+    <Data Name='ScreenOffFullEnergyCapacityAtEnd'>52000</Data>
+    <Data Name='SleepFullEnergyCapacityAtStart'>52000</Data>
+    <Data Name='SleepFullEnergyCapacityAtEnd'>52000</Data>
+    <Data Name='PowerSchemeInfo'>0</Data>
+    <Data Name='PowerButtonSuppressionActionCount'>0</Data>
+    <Data Name='ScreenOffSwDripsResidencyInUs'>0</Data>
+    <Data Name='ScreenOffHwDripsResidencyInUs'>0</Data>
+    <Data Name='SleepSwDripsResidencyInUs'>0</Data>
+    <Data Name='SleepHwDripsResidencyInUs'>0</Data>
+  </EventData>
+</Event>

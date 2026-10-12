@@ -7,7 +7,16 @@ import pytest
 
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source, from_json, to_json
-from timeexisting.ledger.replay import Coverage, Gap, Presence, Timeline, read_coverage, replay
+from timeexisting.ledger.replay import (
+    Coverage,
+    Gap,
+    Interval,
+    IntervalType,
+    Presence,
+    Timeline,
+    read_coverage,
+    replay,
+)
 
 _PHASE_2_SHARD = Path(__file__).parent / "fixtures" / "phase2-shard.jsonl"
 _T0 = datetime(2026, 9, 17, 6, 0, 0, tzinfo=UTC)
@@ -43,7 +52,7 @@ def _stop(ts: datetime, host: str = "laptop", reason: str = "signal", **override
 
 
 def test_empty_ledger_gives_an_empty_timeline():
-    assert replay([]) == Timeline(events=(), presences=(), gaps=())
+    assert replay([]) == Timeline(events=(), intervals=(), presences=(), gaps=())
 
 
 def test_start_and_stop_give_one_interval():
@@ -304,58 +313,34 @@ def test_a_phase_2_shard_reads_without_a_malformed_line():
     assert {event.event for event in result.events} == {EventType.COLLECTOR_START, EventType.COLLECTOR_STOP}
 
 
-def test_a_phase_2_shard_replays_to_the_phase_2_result():
+def test_a_phase_2_shard_replays_under_the_section_6_legacy_rules():
+    # Liveness with no session events is unevidenced, never present; suspended and resumed read as an inferred sleep; every other stop is downtime to the next start.
     def utc(day: int, hour: int, minute: int, second: int = 0) -> datetime:
         return datetime(2026, 9, day, hour, minute, second, tzinfo=UTC)
 
-    host = "TEST-HOST"
+    def interval(
+        kind: IntervalType, start: datetime, end: datetime | None, confidence: Confidence
+    ) -> Interval:
+        return Interval(kind, start, end, "TEST-HOST", confidence, Source.COLLECTOR)
+
+    unevidenced, asleep, downtime = IntervalType.UNEVIDENCED, IntervalType.ASLEEP, IntervalType.DOWNTIME
+    observed, inferred = Confidence.OBSERVED, Confidence.INFERRED
     timeline = replay(store.read_shard(_PHASE_2_SHARD).events)
-    assert timeline.presences == (
-        Presence(utc(21, 4, 55), utc(21, 9, 0), host, end_inferred=True),
-        Presence(utc(21, 9, 40), utc(21, 13, 30, 30), host, end_inferred=True),
-        Presence(utc(21, 13, 45), utc(21, 14, 30), host, end_inferred=False),
-        Presence(utc(22, 4, 58), utc(22, 5, 10), host, end_inferred=False),
-        Presence(utc(22, 5, 12), utc(22, 13, 0), host, end_inferred=False),
-        Presence(utc(22, 13, 5), utc(22, 13, 6), host, end_inferred=False),
-        Presence(utc(22, 13, 20), utc(22, 14, 0), host, end_inferred=False),
-        Presence(utc(23, 5, 1), None, host, end_inferred=False),
+    assert timeline.intervals == (
+        interval(unevidenced, utc(21, 4, 55), utc(21, 9, 0), inferred),
+        interval(asleep, utc(21, 9, 0), utc(21, 9, 40), inferred),
+        interval(unevidenced, utc(21, 9, 40), utc(21, 13, 30, 30), inferred),
+        interval(downtime, utc(21, 13, 30, 30), utc(21, 13, 45), inferred),
+        interval(unevidenced, utc(21, 13, 45), utc(21, 14, 30), observed),
+        interval(downtime, utc(21, 14, 30), utc(22, 4, 58), observed),
+        interval(unevidenced, utc(22, 4, 58), utc(22, 5, 10), observed),
+        interval(downtime, utc(22, 5, 10), utc(22, 5, 12), observed),
+        interval(unevidenced, utc(22, 5, 12), utc(22, 13, 0), observed),
+        interval(downtime, utc(22, 13, 0), utc(22, 13, 5), observed),
+        interval(unevidenced, utc(22, 13, 5), utc(22, 13, 6), observed),
+        interval(downtime, utc(22, 13, 6), utc(22, 13, 20), observed),
+        interval(unevidenced, utc(22, 13, 20), utc(22, 14, 0), observed),
+        interval(downtime, utc(22, 14, 0), utc(23, 5, 1), observed),
+        interval(unevidenced, utc(23, 5, 1), None, observed),
     )
-    assert timeline.gaps == (
-        Gap(utc(21, 9, 0), utc(21, 9, 40), host, start_inferred=True, end_inferred=False, reason="suspended"),
-        Gap(
-            utc(21, 13, 30, 30),
-            utc(21, 13, 45),
-            host,
-            start_inferred=True,
-            end_inferred=False,
-            reason="unclean",
-        ),
-        Gap(
-            utc(21, 14, 30),
-            utc(22, 4, 58),
-            host,
-            start_inferred=False,
-            end_inferred=False,
-            reason="session_end",
-        ),
-        Gap(utc(22, 5, 10), utc(22, 5, 12), host, start_inferred=False, end_inferred=False, reason="signal"),
-        Gap(
-            utc(22, 13, 0),
-            utc(22, 13, 5),
-            host,
-            start_inferred=False,
-            end_inferred=False,
-            reason="console_close",
-        ),
-        Gap(
-            utc(22, 13, 6),
-            utc(22, 13, 20),
-            host,
-            start_inferred=False,
-            end_inferred=False,
-            reason="max_ticks",
-        ),
-        Gap(
-            utc(22, 14, 0), utc(23, 5, 1), host, start_inferred=False, end_inferred=False, reason="stop_file"
-        ),
-    )
+    assert not any(interval.kind is IntervalType.PRESENT for interval in timeline.intervals)

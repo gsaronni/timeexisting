@@ -328,7 +328,7 @@ def _run_config_command(command: str) -> None:
 _STOP_POLL_SECONDS = 0.25
 
 
-def _session_watch() -> Callable[[daemon.Shutdown], object] | None:
+def _session_watch() -> Callable[[daemon.Shutdown, daemon.Inbox], object] | None:
     if sys.platform != "win32":
         return None
     from timeexisting.collector import session_win32
@@ -347,6 +347,7 @@ def _collect_run(cfg: Config) -> None:
                 stop_event=stop_event,
                 on_start=_session_watch(),
                 event_log=backend.event_log(),
+                session=backend.session_probe(),
             )
     except (lockfile.AlreadyRunning, lockfile.LockError) as error:
         logger.warning("collector refused to start: %s", error)

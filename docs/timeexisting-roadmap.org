@@ -227,7 +227,7 @@ Event vocabulary:
 | =day_start= | A start the user typed or confirmed | =user= | =start=: the start as aware ISO 8601 UTC, rendered in local time by the viewer; =detail=: =flag= or =prompt= |
 | =note= | Free text, or a structured diagnostic | =collector=, =manual= | see below |
 
-Sources added in phase 3: =wts= (a live session notification), =probe= (an =OpenInputDesktop= reconciliation or the startup probe), =power= (a live power broadcast), =clock= (a clock-jump inference with no covering log record), =logon= (the session logon time), =user= (a start the user typed or confirmed). =eventlog= covers both the System log and =Microsoft-Windows-Winlogon/Operational=; =win32= keeps its phase 2 meaning. The change is additive: phase 2 shards stay valid at schema version 1 without migration.
+Sources added in phase 3: =wts= (a live session notification), =probe= (a =SessionFlags= reconciliation or the startup probe), =power= (a live power broadcast), =clock= (a clock-jump inference with no covering log record), =logon= (the session logon time), =user= (a start the user typed or confirmed). =eventlog= covers both the System log and =Microsoft-Windows-Winlogon/Operational=; =win32= keeps its phase 2 meaning. The change is additive: phase 2 shards stay valid at schema version 1 without migration.
 
 Winlogon/Operational 811 =Sens= records map onto =lock= and =unlock= with no new event type: =Event= 5 (unlock) and 2 (logon) become =unlock=, =Event= 4 (lock) and 3 (logoff) become =lock=, source =eventlog=, with the channel and the code in =detail=.
 
@@ -317,7 +317,7 @@ Every source here is readable by a normal user. =te= never requires elevation, a
 | =WM_POWERBROADCAST= suspend and resume | =power= | Live signal |
 | System log Kernel-Power 506 and 507, Power-Troubleshooter 1, Kernel-General 1 | =eventlog= | Exact sleep boundaries |
 | System log EventLog 6005 and 6006, Kernel-General 12 and 13 | =eventlog= | Boot and shutdown boundaries |
-| =OpenInputDesktop= | =probe= | Reconciliation only |
+| =WTSQuerySessionInformation= =SessionFlags= | =probe= | Reconciliation only |
 | =WTSQuerySessionInformation= logon time | =logon= | Startup only |
 | Clock jump | =clock= | Fallback when no log record covers a sleep |
 
@@ -339,8 +339,8 @@ Lock and unlock, Winlogon/Operational:
 
 Probe and startup:
 
-- =OpenInputDesktop= is a reconciliation probe, not the primary signal. It reports state, not transitions, and has no timestamp of its own; and the UAC secure desktop also makes it fail, so a single failure is not a lock. Each tick it is compared with the last known session state in the checkpoint; a disagreement that persists for two consecutive ticks writes the missing transition, source =probe=, =inferred=.
-- At collector start the current session state is recorded. If unlocked and the session logon time falls on the current local day, =unlock= source =logon= at the logon time; otherwise =unlock= source =probe= at the start time, =inferred=.
+- The probe is =SessionFlags= from =WTSQuerySessionInformation= with =WTSSessionInfoEx= (=WTSINFOEX_LEVEL1_W=), a reconciliation probe, not the primary signal. It reports state, not transitions, and has no timestamp of its own. It is not =OpenInputDesktop=, because on the work laptop the input desktop opens behind the lock screen: at the step 5 live check =OpenInputDesktop= opened on two consecutive ticks right after a =wts= lock and the collector wrote a false probe =unlock= 3 seconds after the lock with no Winlogon unlock behind it, and a diagnostic sampling every 2 seconds read it closed for one sample at the moment of the lock and open for the whole 2.5-minute locked stretch, while =SessionFlags= read =WTS_SESSIONSTATE_UNLOCK= (1) while unlocked and =WTS_SESSIONSTATE_LOCK= (0) for every sample while locked. =WTS_SESSIONSTATE_UNKNOWN= reads as unknown and confirms nothing. Each tick it is compared with the last known session state in the checkpoint; a disagreement that persists for two consecutive ticks writes the missing transition, source =probe=, =inferred=, at the first of the two ticks, the earliest the probe saw it. A UAC prompt switches the input desktop but does not lock the session, so =SessionFlags= is expected not to read it as a lock; to be confirmed live. The tick drains the session watcher's queue before it probes, so a =wts= transition received since the last tick is already the known state. The probe runs only where the platform has one; elsewhere the checkpoint holds no session state.
+- At collector start the current session state is recorded. If unlocked and the session logon time falls on the current local day and is later than this host's last ledger event before the run (the previous run's stop, or the stop recovered at its checkpoint as unclean), =unlock= source =logon= at the logon time; otherwise =unlock= source =probe= at the start time, =inferred=. A logon at or before that event belongs to a session an earlier run already covered: an =unlock= stamped there would sort before the stop that closes it, and the run would open unevidenced. A session locked at start writes nothing: the state goes into the checkpoint and the next =unlock= opens presence.
 - Startup self-check: each channel is queried once. If Winlogon/Operational is unreadable, the run is WTS-only: logged, one =wts_only= note written, and the collector carries on. If the System log is unreadable, sleep boundaries fall back to the clock-jump path. Neither failure stops the collector, and neither asks for elevation.
 
 ** Backends

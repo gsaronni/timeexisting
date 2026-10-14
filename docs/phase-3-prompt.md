@@ -172,5 +172,6 @@ Give me the checklist below as one block, then wait while I run it over a workin
 5. Kill the collector in Task Manager, stay at the unlocked laptop for three minutes, start `te`: about three minutes of `present`, `inferred`, no `downtime`, collector respawned.
 6. Restart the machine: `off`, then `logon`, with the boundaries from the boot records and Winlogon/Operational. Whether a `session_end` stop appears is not judged here: that is the open phase 2 defect, out of scope.
 7. The next morning, `te` opens without the start prompt and shows the observed start.
+8. Open a "Run as administrator" credential prompt, leave it up for 90 seconds, cancel it: no `lock` or `unlock` lines of any source, and no Winlogon/Operational 811 records in that span. This confirms that `SessionFlags` does not read the UAC secure desktop as a lock.
 
 When I report the results, append a session entry to `docs/logs.org`, update its phase status table, and stop. Tagging `phase-3` is mine.

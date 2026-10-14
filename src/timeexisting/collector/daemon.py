@@ -1,8 +1,12 @@
 """The collector loop (roadmap section 3): records the collector's own presence as `collector_start` and `collector_stop` transitions, and proves it is alive between them with a per-tick checkpoint file, never a ledger line.
 
-`clock` and `sleep` are injected. Tick spacing and the suspend check are measured against the clock, never by counting sleeps, so a test runs hundreds of ticks instantly. Nothing here knows what day it is: the loop writes UTC timestamps, which is what makes midnight and a daylight-saving change non-events.
+`clock` and `sleep` are injected. Tick spacing and the suspend check are measured against the clock, never by counting sleeps, so a test runs hundreds of ticks instantly. The loop writes UTC timestamps, which is what makes midnight and a daylight-saving change non-events. The local day is read once, by the startup probe, to decide whether the session logon happened today.
 
 At start the collector queries each event log channel once (`startup_check`). An unreadable Winlogon/Operational makes the run WTS-only, recorded as one `wts_only` note; an unreadable System log leaves the clock-jump path as the only source of sleep boundaries. Neither stops the collector.
+
+Single writer (roadmap section 3). The session watcher's window thread never appends to the ledger: it puts each session or power transition, stamped at receipt, into the `Inbox`, and the tick loop drains it, so the tick loop's append is the only write path. The one exception is the shutdown, which drains the inbox itself before the stop, under the same mutex.
+
+Session state (roadmap section 6). At start the session probe records the current state and writes the `unlock` that opens the run's presence when the session is unlocked. Each tick it is read again and compared with the last known state, which the checkpoint holds; a disagreement that persists for two consecutive ticks writes the missing transition, source `probe`, `inferred`.
 
 Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), `max_ticks`, and a session end or console close reported from another thread through the `Shutdown` handed to `on_start`. All of them go through that one idempotent `Shutdown`, so the first one wins and the rest do nothing. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
 """
@@ -11,13 +15,16 @@ import json
 import logging
 import math
 import os
+import queue
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, tzinfo
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from timeexisting import paths
 from timeexisting.collector import lockfile
@@ -25,13 +32,16 @@ from timeexisting.config.models import Config
 from timeexisting.domain.clock import Clock
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source, profile_for
-from timeexisting.presence.backend import ChannelCheck, EventLogReader
+from timeexisting.presence.backend import ChannelCheck, EventLogReader, SessionProbe, SessionState
 
 logger = logging.getLogger(__name__)
 
 ROLE = "collector"
 SUSPEND_FACTOR = 2
 _SLEEP_SLICE = 0.5
+
+_SESSION_STATE_OF = {EventType.LOCK: SessionState.LOCKED, EventType.UNLOCK: SessionState.UNLOCKED}
+_SESSION_EVENT_OF = {state: event for event, state in _SESSION_STATE_OF.items()}
 
 
 class StartReason(StrEnum):
@@ -49,8 +59,14 @@ class StopReason(StrEnum):
     CONSOLE_CLOSE = "console_close"
 
 
-def _write(
-    ts: datetime, host: str, profile: str, event: EventType, reason: str, confidence: Confidence
+def _append(
+    ts: datetime,
+    host: str,
+    profile: str,
+    event: EventType,
+    source: Source,
+    confidence: Confidence,
+    data: Mapping[str, str] | None = None,
 ) -> None:
     store.append(
         Event.new(
@@ -58,18 +74,61 @@ def _write(
             host=host,
             profile=profile,
             event=event,
-            source=Source.COLLECTOR,
+            source=source,
             confidence=confidence,
-            data={"reason": reason},
+            data=data,
         )
     )
 
 
-def write_checkpoint(host: str, ts: datetime) -> bool:
-    """Atomically replace the checkpoint with `ts` and our pid: write a temp file beside it, fsync, `os.replace`. A `PermissionError` (Windows, while something else holds the file) is logged and reported as `False`; the next tick tries again."""
+def _write(
+    ts: datetime, host: str, profile: str, event: EventType, reason: str, confidence: Confidence
+) -> None:
+    _append(ts, host, profile, event, Source.COLLECTOR, confidence, {"reason": reason})
+
+
+@dataclass(frozen=True, slots=True)
+class Transition:
+    """A session or power transition the window thread received, stamped at receipt. `detail`, when set, goes into the event's `data`."""
+
+    ts: datetime
+    event: EventType
+    source: Source
+    detail: str | None = None
+
+
+class Inbox:
+    """The window thread's only way into the ledger (roadmap section 3, single writer). `put` stamps a transition with the clock at receipt and queues it; the tick loop drains the queue in arrival order and does the writing. Thread-safe."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+        self._queue: queue.SimpleQueue[Transition] = queue.SimpleQueue()
+
+    def put(self, event: EventType, source: Source, detail: str | None = None) -> None:
+        self._queue.put(Transition(self._clock.now(), event, source, detail))
+
+    def drain(self) -> list[Transition]:
+        drained: list[Transition] = []
+        while True:
+            try:
+                drained.append(self._queue.get_nowait())
+            except queue.Empty:
+                return drained
+
+
+def _record(transition: Transition, host: str, profile: str) -> None:
+    data = None if transition.detail is None else {"detail": transition.detail}
+    _append(transition.ts, host, profile, transition.event, transition.source, Confidence.OBSERVED, data)
+
+
+def write_checkpoint(host: str, ts: datetime, session: SessionState | None = None) -> bool:
+    """Atomically replace the checkpoint with `ts`, our pid and, when there is one, the last known `session` state: write a temp file beside it, fsync, `os.replace`. A `PermissionError` (Windows, while something else holds the file) is logged and reported as `False`; the next tick tries again."""
     target = paths.checkpoint_file(host)
     temporary = target.with_name(f"{target.name}.tmp")
-    payload = json.dumps({"ts": ts.isoformat(), "pid": os.getpid()}).encode("utf-8")
+    record: dict[str, object] = {"ts": ts.isoformat(), "pid": os.getpid()}
+    if session is not None:
+        record["session"] = str(session)
+    payload = json.dumps(record).encode("utf-8")
     try:
         with temporary.open("wb") as handle:
             handle.write(payload)
@@ -96,6 +155,15 @@ def read_checkpoint(host: str) -> datetime | None:
     if ts.tzinfo is None or ts.utcoffset() is None:
         raise ValueError(f"checkpoint ts is naive: {ts.isoformat()}")
     return ts
+
+
+def read_checkpoint_session(host: str) -> SessionState | None:
+    """The last known session state the checkpoint holds, or `None` when there is no checkpoint, it holds none, or it does not parse."""
+    try:
+        record = json.loads(paths.checkpoint_file(host).read_bytes().decode("utf-8"))
+        return SessionState(record["session"])
+    except OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError:
+        return None
 
 
 def delete_checkpoint(host: str) -> None:
@@ -166,17 +234,79 @@ def startup_check(event_log: EventLogReader, ts: datetime, host: str, profile: s
     return channels
 
 
+def startup_probe(
+    session: SessionProbe,
+    ts: datetime,
+    tz: tzinfo,
+    host: str,
+    profile: str,
+    last_event: datetime | None = None,
+) -> SessionState | None:
+    """Record the session state at collector start (roadmap section 6) and return it. Unlocked, with a logon time on the local day of `ts` in `tz` and later than `last_event`: `unlock` source `logon` at the logon time, `observed`. Unlocked otherwise: `unlock` source `probe` at `ts`, `inferred`. Locked or unknown: nothing is written.
+
+    `last_event` is the time of this host's last ledger event before this run started: the previous run's stop, or the stop recovered at its checkpoint as unclean. A logon at or before it belongs to a session an earlier run already covered; an unlock stamped there would sort before that stop, which closes it in replay, so the run would open unevidenced.
+    """
+    state = session.state()
+    logger.info("startup probe: session %s", state or "unknown")
+    if state is not SessionState.UNLOCKED:
+        return state
+    logon = session.logon_time()
+    if (
+        logon is not None
+        and logon <= ts
+        and (last_event is None or logon > last_event)
+        and logon.astimezone(tz).date() == ts.astimezone(tz).date()
+    ):
+        _append(logon, host, profile, EventType.UNLOCK, Source.LOGON, Confidence.OBSERVED)
+    else:
+        _append(ts, host, profile, EventType.UNLOCK, Source.PROBE, Confidence.INFERRED)
+    return state
+
+
+class ProbeReconciler:
+    """The two-tick rule (roadmap section 6). Holds the last known session state: `heard` sets it from a transition that was written, and `observe` compares a probe reading with it.
+
+    A reading that disagrees is held as pending. The same reading on the next tick confirms it: `observe` returns the missing transition's state and the time of the first reading, the earliest the probe saw it, and the known state moves. A reading that agrees drops the pending one. One reading is never enough: a transition can be in flight between the probe and the session notification that reports it. An unknown reading (`None`) confirms nothing and drops the pending one, so two disagreeing readings count only when they are consecutive.
+    """
+
+    def __init__(self, known: SessionState | None) -> None:
+        self.known = known
+        self._pending: tuple[SessionState, datetime] | None = None
+
+    def heard(self, state: SessionState) -> None:
+        self.known = state
+        self._pending = None
+
+    def observe(self, reading: SessionState | None, ts: datetime) -> tuple[SessionState, datetime] | None:
+        if reading is None or reading is self.known:
+            self._pending = None
+            return None
+        if self._pending is not None and self._pending[0] is reading:
+            confirmed = self._pending
+            self.heard(reading)
+            return confirmed
+        self._pending = (reading, ts)
+        return None
+
+
 class Shutdown:
-    """The one way a running collector stops cleanly: write `collector_stop` with the reason (fsynced by `store.append`), delete the checkpoint and the stop file, release the lock, and set the stop event so the loop exits.
+    """The one way a running collector stops cleanly: write whatever is still in the inbox, then `collector_stop` with the reason (fsynced by `store.append`), delete the checkpoint and the stop file, release the lock, and set the stop event so the loop exits.
 
     Idempotent and thread-safe. Logoff can deliver both a console control event and `WM_ENDSESSION`, on threads other than the loop's, so the first call does the work and every later call returns `False` having done nothing. The loop holds `mutex` while it writes a tick, so a shutdown never lands between a tick's ledger lines and no checkpoint is written after the shutdown deleted it.
     """
 
     def __init__(
-        self, clock: Clock, host: str, profile: str, lock: lockfile.Lock, stop_event: threading.Event
+        self,
+        clock: Clock,
+        host: str,
+        profile: str,
+        lock: lockfile.Lock,
+        stop_event: threading.Event,
+        inbox: Inbox | None = None,
     ) -> None:
         self.mutex = threading.RLock()
         self.reason: StopReason | None = None
+        self.inbox = inbox or Inbox(clock)
         self._clock = clock
         self._host = host
         self._profile = profile
@@ -189,6 +319,8 @@ class Shutdown:
                 logger.info("shutdown (%s) ignored: already stopped (%s)", reason, self.reason)
                 return False
             self.reason = reason
+            for transition in self.inbox.drain():
+                _record(transition, self._host, self._profile)
             _write(
                 self._clock.now(),
                 self._host,
@@ -212,24 +344,27 @@ def run_collector(
     *,
     max_ticks: int | None = None,
     stop_event: threading.Event | None = None,
-    on_start: Callable[[Shutdown], object] | None = None,
+    on_start: Callable[[Shutdown, Inbox], object] | None = None,
     event_log: EventLogReader | None = None,
+    session: SessionProbe | None = None,
 ) -> StopReason:
     """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, `max_ticks` ticks have run, or another thread calls the `Shutdown`. Returns the stop reason.
 
-    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`. `on_start` receives that `Shutdown` once `collector_start` and the first checkpoint are on disk; the Windows session watchers hook in there. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
+    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`. `session`, when given, gets the startup probe (`startup_probe`) after that and is read again every tick (`ProbeReconciler`). `on_start` receives the `Shutdown` and the `Inbox` once all of that is on disk; the Windows session watcher hooks in there. Each tick drains the inbox into the ledger before it probes. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
     """
     stop_event = stop_event or threading.Event()
     host = paths.current_host()
     profile = profile_for(host, cfg)
     lock = lockfile.acquire(ROLE)
-    shutdown = Shutdown(clock, host, profile, lock, stop_event)
+    shutdown = Shutdown(clock, host, profile, lock, stop_event, Inbox(clock))
     try:
         if paths.stop_file().exists():
             logger.warning("removing a stop file left over from an earlier stop request")
             paths.stop_file().unlink(missing_ok=True)
         recover(host, profile)
-        reason = _loop(clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start, event_log)
+        reason = _loop(
+            clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start, event_log, session
+        )
         shutdown(reason)
         return shutdown.reason or reason
     except Exception:
@@ -248,18 +383,32 @@ def _loop(
     max_ticks: int | None,
     stop_event: threading.Event,
     shutdown: Shutdown,
-    on_start: Callable[[Shutdown], object] | None,
+    on_start: Callable[[Shutdown, Inbox], object] | None,
     event_log: EventLogReader | None,
+    session: SessionProbe | None,
 ) -> StopReason:
     tick = cfg.collector.tick
+    inbox = shutdown.inbox
+    last = _last_event(host) if session is not None else None
     previous = clock.now()
     _write(previous, host, profile, EventType.COLLECTOR_START, StartReason.LAUNCH, Confidence.OBSERVED)
     write_checkpoint(host, previous)
     logger.info("collector started on %s, tick %s", host, tick)
     if event_log is not None:
         startup_check(event_log, previous, host, profile)
+    reconciler = ProbeReconciler(None)
+    if session is not None:
+        reconciler.known = startup_probe(
+            session,
+            previous,
+            ZoneInfo(cfg.display.timezone),
+            host,
+            profile,
+            None if last is None else last.ts,
+        )
+        write_checkpoint(host, previous, reconciler.known)
     if on_start is not None:
-        on_start(shutdown)
+        on_start(shutdown, inbox)
     ticks = 0
     while True:
         if shutdown.reason is not None:
@@ -295,7 +444,18 @@ def _loop(
                 _write(
                     now, host, profile, EventType.COLLECTOR_START, StartReason.RESUMED, Confidence.OBSERVED
                 )
-            write_checkpoint(host, now)
+            for transition in inbox.drain():
+                _record(transition, host, profile)
+                state = _SESSION_STATE_OF.get(transition.event)
+                if state is not None:
+                    reconciler.heard(state)
+            if session is not None:
+                missing = reconciler.observe(session.state(), now)
+                if missing is not None:
+                    state, seen = missing
+                    logger.info("probe: session %s since %s with no notification", state, seen.isoformat())
+                    _append(seen, host, profile, _SESSION_EVENT_OF[state], Source.PROBE, Confidence.INFERRED)
+            write_checkpoint(host, now, reconciler.known)
             previous = now
 
 

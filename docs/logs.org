@@ -28,6 +28,30 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-14, phase 3 step 5: session and power notifications
+
+*Asked:* step 5 of =docs/phase-3-prompt.md= on =phase-3/step-5-session=: =WTSRegisterSessionNotification= and =WM_POWERBROADCAST= on the existing hidden window, a single writer, a probe reconciled against the checkpoint over two ticks, and the startup probe. Then the live check: Win+L, one minute, unlock, with one =wts= =lock= and =unlock= each within two seconds, no =probe= lines, and the Winlogon 811 =Sens= codes 4 and 5 within two seconds of them.
+
+*Done:*
+- =collector/session_win32.py=: the hidden window registers for this session's notifications after creation and unregisters on =WM_DESTROY=. =WTS_SESSION_LOCK= and =WTS_SESSION_UNLOCK= become =lock= and =unlock=, source =wts=; =PBT_APMSUSPEND= becomes =suspend= and each resume message =resume=, source =power=, with the message name in =detail=. Constants from the Windows SDK 10.0.26100 headers, cited in place. Every session-change and power message is logged at INFO with =wParam= and =lParam= on arrival.
+- =collector/daemon.py=: =Inbox=, the window thread's only way into the ledger. It stamps each transition at receipt; the tick loop drains it and writes, and the shutdown drains it once more before the stop. =ProbeReconciler= holds the last known session state: a disagreeing reading is held, the same reading on the next tick writes the missing transition, source =probe=, =inferred=, at the first of the two ticks, and an unknown reading confirms nothing. The checkpoint gains the last known session state. =startup_probe= writes =unlock= source =logon= at the logon time only when the session is unlocked, the logon is on the current local day and later than this host's last ledger event before the run; otherwise =unlock= source =probe= at the start time, =inferred=. A session locked at start writes nothing.
+- =presence/desktop_win32.py=, new: the only caller of =WTSQuerySessionInformation=, reading =SessionFlags= and =LogonTime= from one =WTSINFOEX_LEVEL1_W= record. =presence/backend.py= gains =SessionState=, the =SessionProbe= protocol, =NoSessionProbe= and =Win32Session= in a session registry beside the event log one.
+- Roadmap section 5 (the =probe= source) and section 6 (sources table, probe bullet, startup bullet) amended to match. =docs/phase-3-prompt.md= step 10 gains item 8, the UAC check.
+- 951 tests, =ruff format --check .= and =ruff check .= clean.
+
+*Decided:* the probe is =SessionFlags= (=WTSSessionInfoEx=), not =OpenInputDesktop=, after the first live check; see Observed.
+
+*Observed:*
+- First live check, 13 October. =OpenInputDesktop= opened on two consecutive ticks right after a =wts= =lock=, and the collector wrote a false =probe= =unlock= 3 seconds after the lock with no Winlogon unlock behind it. No =WM_POWERBROADCAST= arrived during an 11-minute Modern Standby sleep, neither suspend nor any resume message. The Winlogon mapping was confirmed: code 4 and code 5 each matched their =wts= line, at 15 ms and 73 ms.
+- A diagnostic sampled =OpenInputDesktop= and =SessionFlags= side by side every 2 seconds across a lock. =OpenInputDesktop= read closed for one sample at the moment of the lock and open for the whole 2.5-minute locked stretch: on this laptop the input desktop opens behind the lock screen. =SessionFlags= read =WTS_SESSIONSTATE_UNLOCK= (1) while unlocked and =WTS_SESSIONSTATE_LOCK= (0) for every sample while locked. The probe was switched to =SessionFlags=.
+- Second live check, 14 October, passed. =wts= =lock= at 08:10:48.802Z against Winlogon code 4 at 08:10:48.792Z (10 ms); =wts= =unlock= at 08:16:56.966Z against code 5 at 08:16:56.909Z (57 ms); no =probe= lines during six minutes locked. The startup =unlock= was source =probe= because the session logon dates from 9 October: the 08:40 arrival was an unlock, not a logon.
+- On this laptop the session logon time is rarely today, because the laptop sleeps instead of logging off. The =logon= source at startup will be the exception; most runs open on an inferred =probe= =unlock=.
+
+*Carried over:*
+- Step 6 (clock jump, event log reconciliation, recovery). The Winlogon code mapping is confirmed, so the collector may now read Winlogon/Operational.
+- With no =WM_POWERBROADCAST= under Modern Standby, the =power= source cannot be relied on for sleep boundaries on this laptop; the System log records carry them.
+- Whether =SessionFlags= stays unlocked under the UAC secure desktop is step 10 item 8.
+
 ** 2026-10-09, phase 3 step 2: event schema
 
 *Asked:* step 2 of =docs/phase-3-prompt.md= on =phase-3/step-2-schema=: the phase 3 event types and sources in one schema change, structured coverage on =note=, and tests that phase 2 shards still replay.

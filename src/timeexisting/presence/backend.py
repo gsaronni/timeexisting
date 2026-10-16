@@ -22,6 +22,7 @@ from timeexisting.presence.eventlog import (
     boundaries,
     parse_system,
     parse_winlogon,
+    record_time,
     system_xpath,
     winlogon_xpath,
 )
@@ -50,6 +51,10 @@ class EventLogReader(Protocol):
         """This user's Winlogon/Operational lock and unlock records from `since`."""
         ...
 
+    def oldest(self, channel: str) -> datetime | None:
+        """The time of the oldest record in `channel` that the reader's own query would return, or `None` when there is none or it cannot be read. Never earlier than the channel's oldest record of any kind, so a span it reaches back to is truly covered."""
+        ...
+
 
 class NoEventLog:
     """A platform without an event log backend: nothing to check, nothing to read."""
@@ -63,19 +68,24 @@ class NoEventLog:
     def session_records(self, since: datetime) -> list[SessionRecord]:  # noqa: ARG002
         return []
 
+    def oldest(self, channel: str) -> datetime | None:  # noqa: ARG002
+        return None
+
 
 class EventLog:
-    """The Windows event log through three seams: `query(channel, xpath)` returning each record's XML, `probe(channel)`, and `user_sid()`. Each raises `EventLogUnavailable` on failure, which is logged here and read as nothing."""
+    """The Windows event log through four seams: `query(channel, xpath)` returning each record's XML, `first(channel, xpath)` returning the oldest match's XML or `None`, `probe(channel)`, and `user_sid()`. Each raises `EventLogUnavailable` on failure, which is logged here and read as nothing."""
 
     def __init__(
         self,
         query: Callable[[str, str], list[str]],
         probe: Callable[[str], None],
         user_sid: Callable[[], str],
+        first: Callable[[str, str], str | None],
     ) -> None:
         self._query = query
         self._probe = probe
         self._user_sid = user_sid
+        self._first = first
 
     def _readable(self, channel: str) -> bool:
         try:
@@ -123,6 +133,17 @@ class EventLog:
             if record is not None:
                 records.append(record)
         return sorted(records, key=lambda record: record.time)
+
+    def oldest(self, channel: str) -> datetime | None:
+        xpaths = {SYSTEM_CHANNEL: system_xpath(None), WINLOGON_CHANNEL: winlogon_xpath(None)}
+        try:
+            xml = self._first(channel, xpaths[channel])
+            return None if xml is None else record_time(xml)
+        except EventLogUnavailable as error:
+            logger.warning("oldest record unreadable: %s", error)
+        except EventLogFormatError as error:
+            logger.warning("oldest record in %s is malformed: %s", channel, error)
+        return None
 
 
 class SessionState(StrEnum):
@@ -184,7 +205,9 @@ class Win32Session:
 def _windows() -> EventLogReader:
     from timeexisting.presence import eventlog_win32
 
-    return EventLog(eventlog_win32.query, eventlog_win32.probe, eventlog_win32.current_user_sid)
+    return EventLog(
+        eventlog_win32.query, eventlog_win32.probe, eventlog_win32.current_user_sid, eventlog_win32.first
+    )
 
 
 def _windows_session() -> SessionProbe:

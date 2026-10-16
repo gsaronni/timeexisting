@@ -209,7 +209,7 @@ def test_no_checkpoint_means_no_recovery():
     assert _ledger() == ()
 
 
-def test_clock_jump_over_two_ticks_writes_the_suspend_pair(cfg):
+def test_clock_jump_without_an_event_log_writes_a_clock_suspend_and_resume_not_a_stop_and_start(cfg):
     tick = cfg.collector.tick
     clock = _ManualClock(_T0)
     clock.jumps[3] = timedelta(minutes=5)
@@ -220,9 +220,13 @@ def test_clock_jump_over_two_ticks_writes_the_suspend_pair(cfg):
     woke = _T0 + 3 * tick + timedelta(minutes=5)
     assert _summary() == [
         ("collector_start", "launch", _T0, "observed"),
-        ("collector_stop", "suspended", before_sleep, "inferred"),
-        ("collector_start", "resumed", woke, "observed"),
+        ("suspend", "", before_sleep, "inferred"),
+        ("resume", "", woke, "inferred"),
         ("collector_stop", "max_ticks", woke + 2 * tick, "observed"),
+    ]
+    assert [e.source for e in _ledger() if e.event in {EventType.SUSPEND, EventType.RESUME}] == [
+        Source.CLOCK,
+        Source.CLOCK,
     ]
 
 
@@ -245,7 +249,8 @@ def test_clock_moving_backwards_is_logged_and_not_a_suspend(cfg, caplog):
 def test_permission_error_on_replace_is_logged_and_the_next_tick_lands(cfg, caplog, monkeypatch):
     clock = _ManualClock(_T0)
     real_replace = os.replace
-    failures = iter([True])
+    # Both checkpoint writes at start fail: the one right after `collector_start` and the one after the first read.
+    failures = iter([True, True])
 
     def flaky_replace(source, target):
         if next(failures, False):
@@ -443,12 +448,13 @@ class _FakeEventLog:
         return self.channels
 
     def system_boundaries(self, _since: datetime, _until: datetime) -> list:
-        raise AssertionError("the collector reads no System records in step 4")
+        return []
 
     def session_records(self, _since: datetime) -> list:
-        raise AssertionError(
-            "the collector reads no Winlogon records before the step 5 live check confirms the mapping"
-        )
+        return []
+
+    def oldest(self, _channel: str) -> datetime | None:
+        return None
 
 
 def _notes() -> list[Event]:
@@ -912,3 +918,19 @@ class TestProbeReconciler:
         reconciler.heard(_LOCKED)
         assert reconciler.observe(_LOCKED, _T0 + timedelta(seconds=30)) is None
         assert reconciler.known is _LOCKED
+
+
+def test_system_boot_time_reads_psutil_as_aware_utc(monkeypatch):
+    monkeypatch.setattr(daemon.psutil, "boot_time", lambda: _T0.timestamp())
+    booted = daemon.system_boot_time()
+    assert booted == _T0 and booted.tzinfo is UTC
+
+
+def test_an_unreadable_boot_time_is_logged_and_none(monkeypatch, caplog):
+    def broken() -> float:
+        raise OSError("no uptime")
+
+    monkeypatch.setattr(daemon.psutil, "boot_time", broken)
+    with caplog.at_level(logging.WARNING, logger=daemon.__name__):
+        assert daemon.system_boot_time() is None
+    assert "boot time unreadable" in caplog.text

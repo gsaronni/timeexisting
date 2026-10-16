@@ -26,6 +26,7 @@ from timeexisting.presence.eventlog import (
     boundaries,
     parse_system,
     parse_winlogon,
+    record_time,
     system_xpath,
     winlogon_xpath,
 )
@@ -272,6 +273,26 @@ def test_winlogon_xpath_asks_for_811_only():
     assert winlogon_xpath(_utc(15, 6, 0)).startswith(
         "*[System[Provider[@Name='Microsoft-Windows-Winlogon'] and EventID=811 and "
     )
+
+
+def test_without_since_the_queries_keep_the_provider_and_id_filter_and_drop_the_time():
+    assert system_xpath(None) == system_xpath(_utc(15, 6, 0)).replace(
+        " and TimeCreated[@SystemTime>='2026-09-15T06:00:00.000Z']", ""
+    )
+    assert "TimeCreated" not in system_xpath(None)
+    assert "EventID=506" in system_xpath(None)
+    assert winlogon_xpath(None) == ("*[System[Provider[@Name='Microsoft-Windows-Winlogon'] and EventID=811]]")
+
+
+def test_record_time_reads_any_records_time_created():
+    xml = _fixture("eventlog-6005.xml", ts=_utc(15, 6, 1, 2.5))
+    assert record_time(xml) == _utc(15, 6, 1, 2.5)
+    assert record_time(_winlogon(5, ts=_utc(15, 7, 0))) == _utc(15, 7, 0)
+
+
+def test_record_time_of_a_malformed_record_raises():
+    with pytest.raises(EventLogFormatError):
+        record_time("<Event")
 
 
 def test_a_naive_since_is_refused():

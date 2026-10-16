@@ -28,6 +28,37 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-15, phase 3 step 6a: event log reconciliation in the collector
+
+*Asked:* step 6 of =docs/phase-3-prompt.md=, split in two after review; this is 6a, the collector side, on =phase-3/step-6-reconcile=: pending sleep gaps resolved against the System log, Winlogon/Operational reconciliation each tick behind a checkpoint cursor, backfill of every non-deliberate gap, the coverage note. 6b (replay: coverage, reconstruction, =off=, the downtime rules) follows separately.
+
+*Done:*
+- =collector/reconcile.py=, new: =ReadState= (the System and Winlogon/Operational cursors and the pending gaps, as the checkpoint holds them), =Reconciler= (the per-tick reads, the no-repeat key set, pending gap resolution and the clock fallback) and =coverage()=.
+- =collector/daemon.py=: a clock jump no longer writes the =suspended= / =resumed= stop and start; it opens a pending gap, resolved when the System read returns a =resume= between the gap's start and its wake, or written as a =clock= =suspend= and =resume=, =inferred=, after two minutes, at once when the System log is unreadable or there is no event log, and at a clean stop for a gap still pending. Each tick drains the inbox, reads both logs, then probes. At start, a gap since a stop that was not deliberate gets one =coverage= note at the start's time, the cursors begin at that stop (or carry on from a leftover checkpoint), and the first read runs before the first tick; after =stop_file=, =signal=, =console_close= or =max_ticks= the cursors begin at the =collector_start= and nothing inside the gap is written. =boot= from =boot_time()= (=psutil=), source =collector=, only inside a gap the logs do not fully cover. =recover= returns the leftover checkpoint's read state; the checkpoint gains =system_cursor=, =winlogon_cursor= and =pending=, and one from before this step still reads.
+- =presence/backend.py=, =presence/eventlog_win32.py=, =presence/eventlog.py=: =EventLogReader.oldest(channel)= for reach-back, through a new =first(channel, xpath)= seam that reads one record, with the channel's own provider and event ID filter (=system_xpath(None)=, =winlogon_xpath(None)=) and =record_time(xml)=.
+- Ledger: =eventlog= =suspend=, =resume= and =boot= carry the record in =detail=; =boot= also carries =boot_kind= (=start= or =stop=) as a field, matching =Boundary.boot_kind=, so replay never reads the kind from =detail=.
+- Roadmap sections 3, 5, 6 and 8 amended for D1 to D3 below.
+- =cli.py= passes =daemon.system_boot_time= to the collector.
+- 1014 tests, up from 951; =ruff format --check .= and =ruff check .= clean.
+
+*Decided after review of the split:*
+1. D1. The System log is read every tick behind a cursor, not only on a gap: no =WM_POWERBROADCAST= arrives under Modern Standby here (step 5), and the collector ticks through the screen-off phase, so a sleep can begin before the last tick and some never cause a jump. The cursor stands only on the last =suspend= or =boot= returned, never on a =resume=, so a re-read never starts after the Kernel-Power 42 that absorbs the 506 and 507 on the way out of a hibernation. Every read starts at the cursor or the earliest pending gap's start, whichever is earlier. Both queries filter on provider and event ID in the XPath. Records already in the ledger at or after the cursor are not appended again; the key set is built from this host's records in every shard and pruned below the cursor.
+2. D2. A coverage note only for a gap between runs; a sleep inside a running collector is not a gap.
+3. D3. =boot= from =boot_time()= is written by the collector in 6a and only interpreted by replay in 6b.
+4. D4. In 6b a gap that does not reach back counts as wholly uncovered: the note carries booleans, not the oldest record's time.
+5. D5. The start suggestion regression below is accepted until step 8.
+
+*Observed:*
+- Ledger shards are one per host, not per day, so "yesterday's shard" in the review conditions is the same file as today's. The test for it puts the cursor on yesterday's records in that shard and checks that today's ticks re-read them and append nothing. The key set reads every shard and keeps only this host's records, since replay deduplicates per host: another host's record with the same key must not suppress this host's.
+- Reach-back uses the oldest record the channel's filtered query returns, which is never older than the channel's true oldest record, so a covered gap can be reported uncovered, never the reverse.
+- The ledger after 6a, read by the step 3 replay (pinned in =test_the_6a_ledger_through_the_current_replay=): sleeps inside a run are =asleep= at the logged times, a lock during standby lands at its Winlogon time and the late =wts= lock pairs with it; a gap between runs is still =downtime=, but backfilled records set the state the next run opens in, so a run starting on a locked session opens =away=, not =unevidenced=. =boot= and =coverage= lines are ignored until 6b.
+- One full-suite run in this session hung with no output and was stopped; every run after it, before and after the remaining changes, finished in about a minute. Not reproduced.
+- Live check, 15 October, on the dev ledger: all five cases passed, with zero duplicate keys. Eight sleeps came from the System log and no stop was =suspended= or =resumed=, including three consecutive Modern Standby slices at 12:45, 12:51 and 12:56 while the collector kept ticking (D1 confirmed live). The unclean gap from 15:52 to 16:09 backfilled the Winlogon lock and unlock and a System sleep, with one coverage note, every flag true. The 15:52:05 unlock was lost from the inbox by the kill and recovered by the Winlogon backfill. The three gaps stay =downtime= until 6b.
+
+*Carried over:*
+- 6b: reading coverage, reconstruction through covered gaps, =off= from boot records and from the collector's =boot_time= line, the downtime rules. Rule 2's "fold silently" is read as carrying the prior state through the stretch, =inferred=; the roadmap defines it no further.
+- Known regression until step 8 (D5): =cli._first_presence_today= suggests the start from collector runs, and a clock jump no longer splits a run, so a collector that ran overnight through sleeps has no run starting today and the start prompt falls back to =credit.default_start=. Step 8's start resolution replaces it.
+
 ** 2026-10-14, phase 3 step 5: session and power notifications
 
 *Asked:* step 5 of =docs/phase-3-prompt.md= on =phase-3/step-5-session=: =WTSRegisterSessionNotification= and =WM_POWERBROADCAST= on the existing hidden window, a single writer, a probe reconciled against the checkpoint over two ticks, and the startup probe. Then the live check: Win+L, one minute, unlock, with one =wts= =lock= and =unlock= each within two seconds, no =probe= lines, and the Winlogon 811 =Sens= codes 4 and 5 within two seconds of them.

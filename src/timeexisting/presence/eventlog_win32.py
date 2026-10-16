@@ -28,6 +28,18 @@ def query(channel: str, xpath: str) -> list[str]:
     return rendered
 
 
+def first(channel: str, xpath: str) -> str | None:
+    """The oldest record in `channel` matching `xpath`, rendered as event XML, or `None` when nothing matches. Reads one record, not the channel."""
+    try:
+        handle = win32evtlog.EvtQuery(channel, _FLAGS, xpath)
+        events = win32evtlog.EvtNext(handle, 1)
+        return win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml) if events else None
+    except pywintypes.error as error:
+        raise EventLogUnavailable(
+            f"{channel}: {error.funcname} failed, {error.winerror} {error.strerror}"
+        ) from error
+
+
 def probe(channel: str) -> None:
     """Open a query on `channel` and read nothing. An unreadable or absent channel fails here: access denied (5) or channel not found (15007)."""
     try:

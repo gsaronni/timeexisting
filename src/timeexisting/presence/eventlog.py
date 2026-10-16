@@ -148,21 +148,22 @@ def _xpath_time(since: datetime) -> str:
     return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
 
 
-def system_xpath(since: datetime) -> str:
-    """The System log query: the confirmed providers and event IDs, `TimeCreated` at or after `since`."""
+def _since(since: datetime | None) -> str:
+    return "" if since is None else f" and TimeCreated[@SystemTime>='{_xpath_time(since)}']"
+
+
+def system_xpath(since: datetime | None) -> str:
+    """The System log query: the confirmed providers and event IDs, `TimeCreated` at or after `since`, or every such record when `since` is `None`. The provider and event ID filter is always in the query, never applied after a broad read."""
     providers = " or ".join(
         f"(Provider[@Name='{provider}'] and ({' or '.join(f'EventID={event_id}' for event_id in ids)}))"
         for provider, ids in _SYSTEM_IDS.items()
     )
-    return f"*[System[({providers}) and TimeCreated[@SystemTime>='{_xpath_time(since)}']]]"
+    return f"*[System[({providers}){_since(since)}]]"
 
 
-def winlogon_xpath(since: datetime) -> str:
-    """The Winlogon/Operational query: 811, `TimeCreated` at or after `since`. The subscriber, the code and the user are checked by `parse_winlogon`."""
-    return (
-        f"*[System[Provider[@Name='{_WINLOGON}'] and EventID={_WINLOGON_ID}"
-        f" and TimeCreated[@SystemTime>='{_xpath_time(since)}']]]"
-    )
+def winlogon_xpath(since: datetime | None) -> str:
+    """The Winlogon/Operational query: 811, `TimeCreated` at or after `since`, or every 811 when `since` is `None`. The subscriber, the code and the user are checked by `parse_winlogon`."""
+    return f"*[System[Provider[@Name='{_WINLOGON}'] and EventID={_WINLOGON_ID}{_since(since)}]]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +220,11 @@ def _parse(xml: str) -> _Parsed:
         user_id=security.get("UserID") if security is not None else None,
         data=data,
     )
+
+
+def record_time(xml: str) -> datetime:
+    """Any record's `TimeCreated`, aware UTC. Raises `EventLogFormatError` when it is missing or malformed."""
+    return _parse(xml).time
 
 
 def parse_system(xml: str) -> SystemRecord | None:

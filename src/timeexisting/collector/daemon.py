@@ -6,6 +6,8 @@ At start the collector queries each event log channel once (`startup_check`). An
 
 Single writer (roadmap section 3). The session watcher's window thread never appends to the ledger: it puts each session or power transition, stamped at receipt, into the `Inbox`, and the tick loop drains it, so the tick loop's append is the only write path. The one exception is the shutdown, which drains the inbox itself before the stop, under the same mutex.
 
+Event log reconciliation (roadmap section 8, `collector/reconcile.py`). Every tick reads the System log and Winlogon/Operational behind a cursor each and appends what they record. A clock jump is held as a pending gap until the System log resolves it, or written from the clock after two minutes. At start, a gap since the previous run that did not end deliberately gets a `coverage` note, and its records come in with the first read, because the cursors start at the gap's start; a deliberate stop's gap gets neither.
+
 Session state (roadmap section 6). At start the session probe records the current state and writes the `unlock` that opens the run's presence when the session is unlocked. Each tick it is read again and compared with the last known state, which the checkpoint holds; a disagreement that persists for two consecutive ticks writes the missing transition, source `probe`, `inferred`.
 
 Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), `max_ticks`, and a session end or console close reported from another thread through the `Shutdown` handed to `on_start`. All of them go through that one idempotent `Shutdown`, so the first one wins and the rest do nothing. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
@@ -19,20 +21,24 @@ import queue
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
+import psutil
+
 from timeexisting import paths
 from timeexisting.collector import lockfile
+from timeexisting.collector.reconcile import ReadState, Reconciler, coverage
 from timeexisting.config.models import Config
 from timeexisting.domain.clock import Clock
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source, profile_for
 from timeexisting.presence.backend import ChannelCheck, EventLogReader, SessionProbe, SessionState
+from timeexisting.presence.eventlog import BootKind
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,7 @@ _SESSION_EVENT_OF = {state: event for event, state in _SESSION_STATE_OF.items()}
 
 class StartReason(StrEnum):
     LAUNCH = "launch"
+    # Phase 2 only: a clock jump was written as a `suspended` stop and a `resumed` start. Kept so the values stay named; phase 3 writes a `suspend` and a `resume` instead.
     RESUMED = "resumed"
 
 
@@ -54,9 +61,16 @@ class StopReason(StrEnum):
     SIGNAL = "signal"
     MAX_TICKS = "max_ticks"
     UNCLEAN = "unclean"
+    # Phase 2 only, see `StartReason.RESUMED`.
     SUSPENDED = "suspended"
     SESSION_END = "session_end"
     CONSOLE_CLOSE = "console_close"
+
+
+# Stops the code treats as user intent (roadmap section 8): the gap after one gets no backfill and no reconstruction. `signal` and `console_close` can only reach a collector running in a terminal; `max_ticks` is test-only.
+DELIBERATE_STOPS = frozenset(
+    {StopReason.STOP_FILE, StopReason.SIGNAL, StopReason.CONSOLE_CLOSE, StopReason.MAX_TICKS}
+)
 
 
 def _append(
@@ -121,13 +135,17 @@ def _record(transition: Transition, host: str, profile: str) -> None:
     _append(transition.ts, host, profile, transition.event, transition.source, Confidence.OBSERVED, data)
 
 
-def write_checkpoint(host: str, ts: datetime, session: SessionState | None = None) -> bool:
-    """Atomically replace the checkpoint with `ts`, our pid and, when there is one, the last known `session` state: write a temp file beside it, fsync, `os.replace`. A `PermissionError` (Windows, while something else holds the file) is logged and reported as `False`; the next tick tries again."""
+def write_checkpoint(
+    host: str, ts: datetime, session: SessionState | None = None, reads: ReadState | None = None
+) -> bool:
+    """Atomically replace the checkpoint with `ts`, our pid and, when there are any, the last known `session` state and the event log `reads` (cursors and pending gaps): write a temp file beside it, fsync, `os.replace`. A `PermissionError` (Windows, while something else holds the file) is logged and reported as `False`; the next tick tries again."""
     target = paths.checkpoint_file(host)
     temporary = target.with_name(f"{target.name}.tmp")
     record: dict[str, object] = {"ts": ts.isoformat(), "pid": os.getpid()}
     if session is not None:
         record["session"] = str(session)
+    if reads is not None:
+        record.update(reads.record())
     payload = json.dumps(record).encode("utf-8")
     try:
         with temporary.open("wb") as handle:
@@ -166,6 +184,15 @@ def read_checkpoint_session(host: str) -> SessionState | None:
         return None
 
 
+def read_checkpoint_reads(host: str) -> ReadState | None:
+    """The event log cursors and pending gaps the checkpoint holds, or `None` when there is no checkpoint or it does not parse. A checkpoint without them gives an empty `ReadState`."""
+    try:
+        record = json.loads(paths.checkpoint_file(host).read_bytes().decode("utf-8"))
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+        return None
+    return ReadState.from_record(record) if isinstance(record, dict) else None
+
+
 def delete_checkpoint(host: str) -> None:
     target = paths.checkpoint_file(host)
     target.unlink(missing_ok=True)
@@ -177,8 +204,8 @@ def _last_event(host: str) -> Event | None:
     return max(events, key=lambda event: (event.ts, event.id), default=None)
 
 
-def recover(host: str, profile: str) -> None:
-    """Close the previous run if it ended without a clean stop. Runs after the lock is held and before `collector_start`.
+def recover(host: str, profile: str) -> ReadState | None:
+    """Close the previous run if it ended without a clean stop, and return the event log cursors and pending gaps its checkpoint held. Runs after the lock is held and before `collector_start`.
 
     A leftover checkpoint means the previous run may not have stopped cleanly. If the host's last ledger event is already a `collector_stop` at or after the checkpoint's `ts`, it did, and only the checkpoint's deletion was lost. Otherwise an inferred `collector_stop` with reason `unclean` goes in at the checkpoint's `ts`. An unparseable checkpoint is deleted and nothing is written: nothing is guessed.
     """
@@ -187,9 +214,10 @@ def recover(host: str, profile: str) -> None:
     except ValueError as error:
         logger.warning("deleting %s without recovery: %s", paths.checkpoint_file(host), error)
         delete_checkpoint(host)
-        return
+        return None
     if checkpoint is None:
-        return
+        return None
+    reads = read_checkpoint_reads(host)
     last = _last_event(host)
     if last is not None and last.event is EventType.COLLECTOR_STOP and last.ts >= checkpoint:
         logger.info(
@@ -199,6 +227,7 @@ def recover(host: str, profile: str) -> None:
         logger.warning("previous run ended uncleanly; inferring collector_stop at %s", checkpoint.isoformat())
         _write(checkpoint, host, profile, EventType.COLLECTOR_STOP, StopReason.UNCLEAN, Confidence.INFERRED)
     delete_checkpoint(host)
+    return reads
 
 
 def startup_check(event_log: EventLogReader, ts: datetime, host: str, profile: str) -> ChannelCheck | None:
@@ -312,6 +341,8 @@ class Shutdown:
         self._profile = profile
         self._lock = lock
         self._stop_event = stop_event
+        # Writes what the run holds only in memory and the checkpoint, the pending sleep gaps, before the stop deletes the checkpoint. Set by the loop.
+        self.flush: Callable[[], None] | None = None
 
     def __call__(self, reason: StopReason) -> bool:
         with self.mutex:
@@ -321,6 +352,8 @@ class Shutdown:
             self.reason = reason
             for transition in self.inbox.drain():
                 _record(transition, self._host, self._profile)
+            if self.flush is not None:
+                self.flush()
             _write(
                 self._clock.now(),
                 self._host,
@@ -347,10 +380,11 @@ def run_collector(
     on_start: Callable[[Shutdown, Inbox], object] | None = None,
     event_log: EventLogReader | None = None,
     session: SessionProbe | None = None,
+    boot_time: Callable[[], datetime | None] | None = None,
 ) -> StopReason:
     """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, `max_ticks` ticks have run, or another thread calls the `Shutdown`. Returns the stop reason.
 
-    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`. `session`, when given, gets the startup probe (`startup_probe`) after that and is read again every tick (`ProbeReconciler`). `on_start` receives the `Shutdown` and the `Inbox` once all of that is on disk; the Windows session watcher hooks in there. Each tick drains the inbox into the ledger before it probes. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
+    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`, then the coverage note for a gap since a stop that was not deliberate, then the first read; it is read again every tick (`reconcile.Reconciler`). Without it a clock jump is written from the clock at once. `boot_time`, when given, is asked once, only for a gap the logs do not fully cover. `session`, when given, gets the startup probe (`startup_probe`) after that and is read again every tick (`ProbeReconciler`). `on_start` receives the `Shutdown` and the `Inbox` once all of that is on disk; the Windows session watcher hooks in there. Each tick drains the inbox into the ledger, then reads the event logs, then probes. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
     """
     stop_event = stop_event or threading.Event()
     host = paths.current_host()
@@ -361,9 +395,21 @@ def run_collector(
         if paths.stop_file().exists():
             logger.warning("removing a stop file left over from an earlier stop request")
             paths.stop_file().unlink(missing_ok=True)
-        recover(host, profile)
+        leftover = recover(host, profile)
         reason = _loop(
-            clock, sleep, cfg, host, profile, max_ticks, stop_event, shutdown, on_start, event_log, session
+            clock,
+            sleep,
+            cfg,
+            host,
+            profile,
+            max_ticks,
+            stop_event,
+            shutdown,
+            on_start,
+            event_log,
+            session,
+            leftover,
+            boot_time,
         )
         shutdown(reason)
         return shutdown.reason or reason
@@ -372,6 +418,50 @@ def run_collector(
         raise
     finally:
         lockfile.release(lock)
+
+
+def _gap_start(events: Iterable[Event]) -> Event | None:
+    """The stop that opens the gap before this run, when the gap is to be backfilled: this host's last collector event, if it is a `collector_stop` the code does not treat as user intent. `None` for a deliberate stop, a last event that is a start (where the previous run ended is unknown), and an empty shard."""
+    collector = [e for e in events if e.event in {EventType.COLLECTOR_START, EventType.COLLECTOR_STOP}]
+    last = max(collector, key=lambda event: (event.ts, event.id), default=None)
+    if last is None or last.event is not EventType.COLLECTOR_STOP:
+        return None
+    if last.data.get("reason") in DELIBERATE_STOPS:
+        return None
+    return last
+
+
+def _backfill_gap(
+    stop: Event,
+    start: datetime,
+    event_log: EventLogReader,
+    channels: ChannelCheck | None,
+    boot_time: Callable[[], datetime | None] | None,
+    host: str,
+    profile: str,
+) -> None:
+    """The coverage note for the gap from `stop` to `start` (roadmap section 8), and a `boot` from `boot_time()` when the machine started inside a gap the logs do not fully cover. The gap's records come in with the first read, since the cursors start at the stop."""
+    covered = coverage(event_log, channels, stop.ts, start)
+    _append(start, host, profile, EventType.NOTE, Source.COLLECTOR, Confidence.OBSERVED, covered.data())
+    logger.info("gap since %s: %s", stop.ts.isoformat(), dict(covered.data()))
+    fully = (
+        covered.system_readable
+        and covered.system_reaches_back
+        and covered.winlogon_readable
+        and covered.winlogon_reaches_back
+    )
+    booted = boot_time() if boot_time is not None and not fully else None
+    if booted is not None and stop.ts < booted < start:
+        logger.info("machine booted at %s inside a gap the logs do not cover", booted.isoformat())
+        _append(
+            booted,
+            host,
+            profile,
+            EventType.BOOT,
+            Source.COLLECTOR,
+            Confidence.OBSERVED,
+            {"detail": "boot_time", "boot_kind": str(BootKind.START)},
+        )
 
 
 def _loop(
@@ -386,19 +476,45 @@ def _loop(
     on_start: Callable[[Shutdown, Inbox], object] | None,
     event_log: EventLogReader | None,
     session: SessionProbe | None,
+    leftover: ReadState | None,
+    boot_time: Callable[[], datetime | None] | None,
 ) -> StopReason:
     tick = cfg.collector.tick
     inbox = shutdown.inbox
-    last = _last_event(host) if session is not None else None
+    ledger = store.read_all().events
+    own = [event for event in ledger if event.host == host]
+    last = max(own, key=lambda event: (event.ts, event.id), default=None)
+    gap = _gap_start(own)
     previous = clock.now()
     _write(previous, host, profile, EventType.COLLECTOR_START, StartReason.LAUNCH, Confidence.OBSERVED)
     write_checkpoint(host, previous)
     logger.info("collector started on %s, tick %s", host, tick)
-    if event_log is not None:
-        startup_check(event_log, previous, host, profile)
-    reconciler = ProbeReconciler(None)
+    channels = startup_check(event_log, previous, host, profile) if event_log is not None else None
+    if gap is None and leftover is not None and (leftover.pending or leftover.system_cursor is not None):
+        logger.info(
+            "the previous run stopped deliberately: its event log cursors and pending gaps are dropped"
+        )
+    reads = leftover if gap is not None and leftover is not None else ReadState()
+
+    def append(
+        ts: datetime,
+        event: EventType,
+        source: Source,
+        confidence: Confidence,
+        data: Mapping[str, str] | None = None,
+    ) -> None:
+        _append(ts, host, profile, event, source, confidence, data)
+
+    reconciler = Reconciler(
+        event_log, channels, reads, previous if gap is None else gap.ts, host, ledger, append
+    )
+    shutdown.flush = reconciler.flush
+    if event_log is not None and gap is not None:
+        _backfill_gap(gap, previous, event_log, channels, boot_time, host, profile)
+    reconciler.tick(previous)
+    probe = ProbeReconciler(None)
     if session is not None:
-        reconciler.known = startup_probe(
+        probe.known = startup_probe(
             session,
             previous,
             ZoneInfo(cfg.display.timezone),
@@ -406,7 +522,7 @@ def _loop(
             profile,
             None if last is None else last.ts,
         )
-        write_checkpoint(host, previous, reconciler.known)
+    write_checkpoint(host, previous, probe.known, reconciler.state)
     if on_start is not None:
         on_start(shutdown, inbox)
     ticks = 0
@@ -433,30 +549,30 @@ def _loop(
                 )
             elif now - previous > SUSPEND_FACTOR * tick:
                 logger.info("clock jumped %s since the last tick: suspended", now - previous)
-                _write(
-                    previous,
-                    host,
-                    profile,
-                    EventType.COLLECTOR_STOP,
-                    StopReason.SUSPENDED,
-                    Confidence.INFERRED,
-                )
-                _write(
-                    now, host, profile, EventType.COLLECTOR_START, StartReason.RESUMED, Confidence.OBSERVED
-                )
+                reconciler.jump(previous, now)
             for transition in inbox.drain():
                 _record(transition, host, profile)
                 state = _SESSION_STATE_OF.get(transition.event)
                 if state is not None:
-                    reconciler.heard(state)
+                    probe.heard(state)
+            reconciler.tick(now)
             if session is not None:
-                missing = reconciler.observe(session.state(), now)
+                missing = probe.observe(session.state(), now)
                 if missing is not None:
                     state, seen = missing
                     logger.info("probe: session %s since %s with no notification", state, seen.isoformat())
                     _append(seen, host, profile, _SESSION_EVENT_OF[state], Source.PROBE, Confidence.INFERRED)
-            write_checkpoint(host, now, reconciler.known)
+            write_checkpoint(host, now, probe.known, reconciler.state)
             previous = now
+
+
+def system_boot_time() -> datetime | None:
+    """When the machine last booted, aware UTC, from `psutil`; `None` when it cannot be read. The `boot_time` seam `te collect` passes to `run_collector`."""
+    try:
+        return datetime.fromtimestamp(psutil.boot_time(), UTC)
+    except (OSError, psutil.Error) as error:
+        logger.warning("boot time unreadable: %s", error)
+        return None
 
 
 def interruptible_sleep(stop_event: threading.Event) -> Callable[[float], None]:

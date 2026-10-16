@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 41, 7 October 2026 (phase 3 step 1: presence model, event log sources, recovery against checkpoints).
+*Last revised:* week 42, 15 October 2026 (phase 3 step 6a: the System log read every tick behind a cursor, coverage for gaps between runs, =boot= from =boot_time()= written by the collector).
 
 
 * 1. Purpose and Scope
@@ -75,10 +75,10 @@ The dashboard is not open all day. The collector must survive the terminal closi
 ** Collector lifecycle
 
 - Lockfile at =state/collector-{host}.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
-- The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json=: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint. The checkpoint holds the current UTC timestamp and the collector's PID and, from phase 3, the last known session state (for the probe, section 6), any pending gap still waiting for its event log record, and the Winlogon/Operational read cursor (section 8). State that must survive a crash lives here, never in memory alone.
+- The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json=: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint. The checkpoint holds the current UTC timestamp and the collector's PID and, from phase 3, the last known session state (for the probe, section 6), any pending gap still waiting for its event log record, and the System and Winlogon/Operational read cursors (section 8). State that must survive a crash lives here, never in memory alone.
 - Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick. The gap that follows is backfilled from the event logs (section 8).
 - Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= on phase 2 shards, where a clock jump was written as a stop and start pair.
-- Clock jump. If the clock shows more than twice the tick interval (60 seconds) since the previous tick, the machine was suspended. From phase 3 this no longer writes a =collector_stop= and =collector_start= pair: the collector holds the gap as pending in the checkpoint and resolves it against the System log (section 8), writing one =suspend= and one =resume=. Phase 2 shards keep their =suspended= and =resumed= pairs, which replay reads as an inferred suspend and resume (section 6). The threshold is well clear of real clock corrections: the largest Kernel-General 1 correction outside a hibernate wake over 21 days at step 0 was 2.6 seconds.
+- Clock jump. If the clock shows more than twice the tick interval (60 seconds) since the previous tick, the machine was suspended. From phase 3 this no longer writes a =collector_stop= and =collector_start= pair: the collector holds the gap as pending in the checkpoint until the System log, read every tick, resolves it (section 8), or writes one =suspend= and one =resume= from the clock when it does not. Phase 2 shards keep their =suspended= and =resumed= pairs, which replay reads as an inferred suspend and resume (section 6). The threshold is well clear of real clock corrections: the largest Kernel-General 1 correction outside a hibernate wake over 21 days at step 0 was 2.6 seconds.
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile, attach. Stale lock, reclaim and spawn.
 - =q= quits the viewer and leaves the collector. =Q= stops both.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
@@ -222,7 +222,7 @@ Event vocabulary:
 | =unlock= | Session unlocked or logged on | =wts=, =eventlog=, =probe=, =logon= | =detail= as for =lock= |
 | =suspend= | Machine entered sleep or hibernation | =power=, =eventlog=, =clock= | =detail=: the power message, or the 506 reason |
 | =resume= | Machine woke | =power=, =eventlog=, =clock= | =detail=: the power message, or the 507 reason or wake source |
-| =boot= | A shutdown or start boundary | =eventlog= (the boot records), =collector= (=boot_time()= in an uncovered stretch, section 8) | =detail=: the record (EventLog 6006 or Kernel-General 13 for shutdown, EventLog 6005 or Kernel-General 12 for start), or =boot_time= |
+| =boot= | A shutdown or start boundary | =eventlog= (the boot records), =collector= (=boot_time()= in a gap the logs do not fully cover, section 8) | =detail=: the record (EventLog 6006 or Kernel-General 13 for shutdown, EventLog 6005 or Kernel-General 12 for start), or =boot_time=; =boot_kind=: =start= or =stop=, which replay reads instead of =detail= |
 | =input= | User input after a resume on an unlocked session | =eventlog= (a 507 wake reason), =win32= (=GetLastInputInfo=) | =detail=: the 507 reason, for =eventlog= |
 | =day_start= | A start the user typed or confirmed | =user= | =start=: the start as aware ISO 8601 UTC, rendered in local time by the viewer; =detail=: =flag= or =prompt= |
 | =note= | Free text, or a structured diagnostic | =collector=, =manual= | see below |
@@ -235,7 +235,7 @@ Structured =note= kinds. Replay reads only the =data= fields of a structured not
 
 | =kind= | Fields | Written |
 |---|---|---|
-| =coverage= | =span_start=, =span_end= (ISO 8601 UTC); =system_readable=, =system_reaches_back=, =winlogon_readable=, =winlogon_reaches_back= (each =true= or =false=) | With every backfill (section 8). A channel reaches back when its oldest record is no later than =span_start=. A missing or non-boolean field makes the note unreadable to replay, which then treats the span as uncovered. |
+| =coverage= | =span_start=, =span_end= (ISO 8601 UTC); =system_readable=, =system_reaches_back=, =winlogon_readable=, =winlogon_reaches_back= (each =true= or =false=) | At collector start, once for each gap between runs that did not end in a deliberate stop (section 8), at the start's time. A sleep inside a running collector is not a gap and gets no note. A channel reaches back when the oldest record its own query returns (the same provider and event ID filter) is no later than =span_start=; that record is never older than the channel's oldest record of any kind, so a reach-back can be missed but never invented. A missing or non-boolean field makes the note unreadable to replay, which then treats the span as uncovered. |
 | =wts_only= | none beyond =kind= | Once at collector start when Winlogon/Operational is unreadable: lock and unlock times are live only for this run |
 
 ** Transitions only
@@ -319,7 +319,7 @@ Every source here is readable by a normal user. =te= never requires elevation, a
 | System log EventLog 6005 and 6006, Kernel-General 12 and 13 | =eventlog= | Boot and shutdown boundaries |
 | =WTSQuerySessionInformation= =SessionFlags= | =probe= | Reconciliation only |
 | =WTSQuerySessionInformation= logon time | =logon= | Startup only |
-| Clock jump | =clock= | Fallback when no log record covers a sleep |
+| Clock jump | =clock= | Fallback when no System record resolves a sleep within two minutes, or the System log is unreadable |
 
 Sleep boundaries, System log:
 
@@ -369,32 +369,41 @@ The queue is non-blocking, retained indefinitely, and shown as a single count. =
 
 * 8. Recovery
 
-Recovery works against the checkpoint file (section 3), which holds the last tick's timestamp, the last known session state, any pending gap and the Winlogon/Operational cursor. Every gap in observation is resolved against the System and Winlogon/Operational logs; tick-resolution boundaries survive only where the logs say nothing.
+Recovery works against the checkpoint file (section 3), which holds the last tick's timestamp, the last known session state, any pending gaps and the System and Winlogon/Operational cursors. Every gap in observation is resolved against the System and Winlogon/Operational logs; tick-resolution boundaries survive only where the logs say nothing.
 
 Gaps and how they arise:
 
 | Situation | Detected by | Gap | Action |
 |---|---|---|---|
-| Clock jump while running | More than twice the tick since the previous tick | Previous tick to now | Pending gap, resolved against the System log (below) |
-| =resume= notification while running | =WM_POWERBROADCAST= | The matching =suspend= to the resume | Write the =power= =resume= at receipt; pending gap, as above |
-| Leftover checkpoint at start | The checkpoint exists | Checkpoint timestamp to this start | Write =collector_stop= at the checkpoint, =inferred=, reason =unclean= (unchanged from phase 2); resume any pending gap it holds; backfill |
+| Clock jump while running | More than twice the tick since the previous tick | Previous tick to now | Pending gap, resolved by the System log read (below) |
+| =resume= notification while running | =WM_POWERBROADCAST= | none of its own | Write the =power= =resume= at receipt. The System log read every tick writes the =eventlog= pair; no pending gap is opened for it |
+| Leftover checkpoint at start | The checkpoint exists | Checkpoint timestamp to this start | Write =collector_stop= at the checkpoint, =inferred=, reason =unclean= (unchanged from phase 2); carry on from the cursors and pending gaps it holds; backfill |
 | Last stop =session_end= | The shard's last =collector_stop= | That stop to this start | Backfill and reconstruct |
 | Last stop deliberate: =stop_file=, =signal=, =console_close=, =max_ticks= | The shard's last =collector_stop= | That stop to this start | No backfill, no reconstruction; presence stays closed until the next =collector_start= |
 | No events on this host | Empty shard | none | Normal start resolution (section 4) |
 
 Deliberate stops, from the code: =stop_file= is written only by =te collect stop=. =signal= (SIGINT or SIGBREAK, SIGTERM off Windows) and =console_close= can only reach a collector running in a terminal, since the background collector runs under =pythonw.exe=, detached, with no console and every stream on =DEVNULL=; a Task Manager kill writes no stop at all and is recovered as =unclean=. =max_ticks= is test-only and treated the same. When the Fedora backend arrives, =signal= is revisited: systemd sends SIGTERM at shutdown, which is not intent.
 
-Pending sleep gaps. The System log record can lag the wake, so a pending gap lives in the checkpoint and is retried each tick for two minutes. A covering record writes =suspend= and =resume= at the exact logged times, source =eventlog=, =observed=: =suspend= at the first 506 of the collapsed chain, =resume= at the terminal 507, or for a hibernate wake at the Power-Troubleshooter 1 =WakeTime=, or the Kernel-General 1 Reason 2 time when no Power-Troubleshooter 1 exists; never at a Kernel-Power 107 timestamp. No record within two minutes writes them at the checkpoint and the detected wake time, source =clock=, =inferred=. A pending gap survives a crash because it lives in the checkpoint. The =eventlog= pair is written even when =power= notifications already wrote theirs: both stay in the ledger, and replay pairs them by sequence with =eventlog= as the authority (section 6), so each sleep yields one =suspend= and one =resume= boundary at the logged times.
+The System log every tick. On the work laptop no =WM_POWERBROADCAST= arrives under Modern Standby (step 5), and the collector keeps ticking through the screen-off phase (step 0: 26875 seconds inside 506 to 507 windows), so a sleep can begin before the last tick and some sleeps never cause a clock jump at all. The System log is therefore the primary source of sleep boundaries and is read on every tick, behind a cursor in the checkpoint; the clock jump only decides when to fall back to the clock. The query filters on provider and event ID in its XPath, as does the Winlogon/Operational one, never in code after a broad read. The reader's caller contract:
 
-Lock and unlock reconciliation. Each tick, Winlogon/Operational 811 =Sens= records since the checkpoint's cursor are appended as =lock= or =unlock= (section 5), source =eventlog=, =observed=, at their logged times. The cursor moves only after the append, so a crash can repeat a record but never lose one; replay deduplicates. Skipped entirely in a WTS-only run.
+- Every read starts at the System cursor, or at the start of a pending gap when that is earlier, so every retry re-reads from the gap start.
+- The cursor moves only to the last =suspend= or =boot= boundary returned, never to a =resume= and never past the last boundary returned. A read that started on a hibernate wake would not see the Kernel-Power 42 before it and would read the 506 and 507 written on the way out as a sleep; a read starting on a suspend or a boot sees the whole sleep after it.
+- The cursor moves only after the append, so a crash can repeat a record but never lose one.
+- Re-reading returns records already written. The ledger is transition-only, so a record whose key (event, full-precision time, =detail=, the key replay deduplicates on) is already in the ledger at or after the cursor is not appended again. The key set is built at start from this host's records in every shard, and keys before a cursor are dropped as it advances.
 
-Backfill, every gap. For every gap that is not deliberate, the System and Winlogon/Operational records inside it are appended as above: =suspend= and =resume=, =boot= from EventLog 6005 and 6006 and Kernel-General 12 and 13, =lock= and =unlock=. This always runs and is not one of the rules below. With it, recovery appends one =coverage= note (section 5) giving the span and, per channel, whether it was readable and reaches back to the span's start, so replay stays pure and reads coverage from those fields.
+Pending sleep gaps. The System log record can lag the wake, so a pending gap lives in the checkpoint and is retried each tick for two minutes. It is resolved once the System read returns a =resume= between the gap's start and its wake. A covering record writes =suspend= and =resume= at the exact logged times, source =eventlog=, =observed=: =suspend= at the first 506 of the collapsed chain, =resume= at the terminal 507, or for a hibernate wake at the Power-Troubleshooter 1 =WakeTime=, or the Kernel-General 1 Reason 2 time when no Power-Troubleshooter 1 exists; never at a Kernel-Power 107 timestamp. No record within two minutes writes them at the checkpoint and the detected wake time, source =clock=, =inferred=; so does a clean stop for a gap still pending, since it deletes the checkpoint, and so does a jump while the System log is unreadable, at once. A record that arrives after the clock pair was written is still appended through the cursor, and replay pairs it with the clock pair, =eventlog= as the authority. A pending gap survives a crash because it lives in the checkpoint. The =eventlog= pair is written even when =power= notifications already wrote theirs: both stay in the ledger, and replay pairs them by sequence with =eventlog= as the authority (section 6), so each sleep yields one =suspend= and one =resume= boundary at the logged times.
+
+Lock and unlock reconciliation. Each tick, Winlogon/Operational 811 =Sens= records since the checkpoint's cursor are appended as =lock= or =unlock= (section 5), source =eventlog=, =observed=, at their logged times, under the same no-repeat rule as the System log. The cursor moves to the last record returned, only after the append, so a crash can repeat a record but never lose one; replay deduplicates. Skipped entirely in a WTS-only run.
+
+Backfill, every gap. For every gap between runs that is not deliberate, the System and Winlogon/Operational records inside it are appended as above: =suspend= and =resume=, =boot= from EventLog 6005 and 6006 and Kernel-General 12 and 13, =lock= and =unlock=. The backfill is the per-tick read itself: at start, the cursors carry on from a leftover checkpoint, or begin at the stop that opened the gap, and the first read runs before the first tick. After a deliberate stop they begin at the =collector_start=, and a leftover checkpoint's cursors and pending gaps are dropped. This always runs and is not one of the rules below. With it, the collector appends one =coverage= note (section 5) giving the span and, per channel, whether it was readable at the self-check and reaches back to the span's start, so replay stays pure and reads coverage from those fields. A sleep inside a running collector is not a gap between runs and gets no note.
+
+When the gap is not fully covered (any of the four coverage flags false) and =boot_time()= falls inside it, the collector also writes =boot=, source =collector=, =detail= =boot_time=, =boot_kind= =start=, at that time: the collector is the only side that can read =boot_time()=, and rule 1 below reads the line.
 
 Reconstruction. When both channels were readable and both reach back to the start of the gap, the gap is reconstructed from them: the state before the gap carries through unless a backfilled record changes it, and every interval inside the gap is =inferred=. No =downtime= is emitted for it.
 
 Downtime, only where neither log covers. For the stretches the backfill cannot cover (a channel unreadable, the gap beyond retention, a WTS-only run), rules in order:
 
-1. =boot_time()= falls inside the stretch. *Machine was off.* Write =boot= and mark the stretch =off= up to it, =inferred=.
+1. A =boot= from =boot_time()= falls inside the stretch (written by the collector, above). *Machine was off.* Mark the stretch =off= up to it, =inferred=.
 2. The stretch is shorter than =absence.micro_max=. *Collector restarted.* Fold silently.
 3. Otherwise. *Collector downtime.* Leave it as =downtime=. Phase 4 queues downtime while unlocked as =unknown=, *excluded from accrual until answered*. Unobserved time is not credited.
 

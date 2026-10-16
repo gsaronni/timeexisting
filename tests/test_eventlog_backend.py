@@ -31,7 +31,7 @@ def _xml(name: str) -> str:
 
 
 class _FakeLog:
-    """The three seams, answering from canned XML per channel. A channel listed in `unreadable` raises on probe and query."""
+    """The four seams, answering from canned XML per channel. A channel listed in `unreadable` raises on probe, query and first."""
 
     def __init__(
         self, records: dict[str, list[str]], unreadable: tuple[str, ...] = (), sid: str | None = _USER
@@ -40,6 +40,7 @@ class _FakeLog:
         self.unreadable = unreadable
         self.sid = sid
         self.queries: list[tuple[str, str]] = []
+        self.firsts: list[tuple[str, str]] = []
         self.probes: list[str] = []
 
     def query(self, channel: str, xpath: str) -> list[str]:
@@ -47,6 +48,13 @@ class _FakeLog:
         if channel in self.unreadable:
             raise EventLogUnavailable(f"{channel}: EvtQuery failed, 5 Access is denied.")
         return list(self.records.get(channel, []))
+
+    def first(self, channel: str, xpath: str) -> str | None:
+        self.firsts.append((channel, xpath))
+        if channel in self.unreadable:
+            raise EventLogUnavailable(f"{channel}: EvtQuery failed, 5 Access is denied.")
+        records = self.records.get(channel, [])
+        return records[0] if records else None
 
     def probe(self, channel: str) -> None:
         self.probes.append(channel)
@@ -59,7 +67,7 @@ class _FakeLog:
         return self.sid
 
     def reader(self) -> EventLog:
-        return EventLog(self.query, self.probe, self.user_sid)
+        return EventLog(self.query, self.probe, self.user_sid, self.first)
 
 
 def test_system_boundaries_query_the_system_channel_and_parse_the_records():
@@ -151,6 +159,40 @@ def test_no_event_log_checks_nothing_and_returns_nothing():
     assert reader.check() is None
     assert reader.system_boundaries(_SINCE, _UNTIL) == []
     assert reader.session_records(_SINCE) == []
+    assert reader.oldest(SYSTEM_CHANNEL) is None
+
+
+@pytest.mark.parametrize(
+    ("channel", "fixture", "expected"),
+    [
+        (SYSTEM_CHANNEL, "kernel-power-506.xml", datetime(2026, 9, 14, 14, 32, 7, 123456, tzinfo=UTC)),
+        (WINLOGON_CHANNEL, "winlogon-811.xml", datetime(2026, 9, 15, 6, 2, 30, 468000, tzinfo=UTC)),
+    ],
+)
+def test_oldest_reads_one_record_through_the_channels_own_filtered_query(channel, fixture, expected):
+    fake = _FakeLog({channel: [_xml(fixture)]})
+    assert fake.reader().oldest(channel) == expected
+    xpath = system_xpath(None) if channel == SYSTEM_CHANNEL else winlogon_xpath(None)
+    assert fake.firsts == [(channel, xpath)]
+    assert fake.queries == []
+
+
+def test_oldest_of_an_empty_channel_is_none():
+    assert _FakeLog({}).reader().oldest(SYSTEM_CHANNEL) is None
+
+
+def test_oldest_of_an_unreadable_channel_is_logged_and_none(caplog):
+    fake = _FakeLog({}, unreadable=(WINLOGON_CHANNEL,))
+    with caplog.at_level(logging.WARNING, logger=backend.__name__):
+        assert fake.reader().oldest(WINLOGON_CHANNEL) is None
+    assert "oldest record unreadable" in caplog.text
+
+
+def test_a_malformed_oldest_record_is_logged_and_none(caplog):
+    fake = _FakeLog({SYSTEM_CHANNEL: ["<Event"]})
+    with caplog.at_level(logging.WARNING, logger=backend.__name__):
+        assert fake.reader().oldest(SYSTEM_CHANNEL) is None
+    assert "malformed" in caplog.text
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "android"])

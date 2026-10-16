@@ -67,6 +67,24 @@ def test_a_failing_query_raises_unavailable_with_the_channel(api, fail_on):
         eventlog_win32.query("System", "*")
 
 
+def test_first_reads_one_record_and_renders_it(api):
+    fake = api([["a"], ["b"]])
+    assert eventlog_win32.first("System", "*[System]") == "<xml>a</xml>"
+    assert fake.calls == [("EvtQuery", "System", _FLAGS, "*[System]"), ("EvtNext", "handle", 1)]
+
+
+def test_first_of_an_empty_result_is_none(api):
+    api([])
+    assert eventlog_win32.first("System", "*") is None
+
+
+@pytest.mark.parametrize("fail_on", ["EvtQuery", "EvtNext"])
+def test_a_failing_first_raises_unavailable_with_the_channel(api, fail_on):
+    api([["a"]], fail_on=fail_on)
+    with pytest.raises(EventLogUnavailable, match=rf"System: {fail_on} failed, 5"):
+        eventlog_win32.first("System", "*")
+
+
 def test_probe_opens_a_query_and_reads_nothing(api):
     fake = api([["a"]])
     eventlog_win32.probe("Microsoft-Windows-Winlogon/Operational")

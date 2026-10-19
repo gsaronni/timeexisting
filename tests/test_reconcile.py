@@ -16,7 +16,7 @@ from timeexisting.collector import daemon
 from timeexisting.collector.reconcile import PENDING_WINDOW, PendingGap, ReadState, Reconciler
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source
-from timeexisting.ledger.replay import Coverage, IntervalType, read_coverage, replay
+from timeexisting.ledger.replay import DELIBERATE_REASONS, Coverage, IntervalType, read_coverage, replay
 from timeexisting.presence.backend import ChannelCheck, EventLog, NoEventLog
 from timeexisting.presence.eventlog import (
     SYSTEM_CHANNEL,
@@ -842,11 +842,11 @@ def test_the_read_state_round_trips_through_the_checkpoint():
     assert daemon.read_checkpoint_reads(_host()) == state
 
 
-# What the ledger looks like after 6a, read by the step 3 replay.
+# What the collector's ledger looks like through replay.
 
 
-def test_the_6a_ledger_through_the_current_replay(cfg):
-    """A run with a standby and a Winlogon lock and unlock, a crash, a gap with a backfilled sleep and lock, and a run that starts on a locked session. In-run sleeps are `asleep` at the logged times; the gap is still `downtime` (reconstruction is 6b); the backfilled lock carries into the next run, which opens `away`."""
+def test_the_collector_ledger_through_replay(cfg):
+    """A run with a standby and a Winlogon lock and unlock, a crash, a gap with a backfilled lock, and a run that starts on a locked session. In-run sleeps are `asleep` at the logged times. Both logs cover the gap, so it is reconstructed: presence carries through the crash to the backfilled lock, every interval inside is `inferred`, there is no `downtime`, and the next run opens `away`."""
     clock = _Clock(_T0)
     log = _Log(clock)
     _history(log)
@@ -883,8 +883,61 @@ def test_the_6a_ledger_through_the_current_replay(cfg):
         (IntervalType.AWAY, lock, standby, "observed"),
         (IntervalType.ASLEEP, standby, wake, "observed"),
         (IntervalType.AWAY, wake, unlock_again, "observed"),
-        (IntervalType.PRESENT, unlock_again, crash, "inferred"),
-        (IntervalType.DOWNTIME, crash, restart, "inferred"),
+        (IntervalType.PRESENT, unlock_again, crash, "observed"),
+        (IntervalType.PRESENT, crash, second_lock, "inferred"),
+        (IntervalType.AWAY, second_lock, restart, "inferred"),
         (IntervalType.AWAY, restart, restart + 2 * _TICK, "observed"),
         (IntervalType.DOWNTIME, restart + 2 * _TICK, None, "observed"),
     ]
+
+
+def test_a_reboot_both_logs_cover_is_off_then_away_until_the_logon(cfg):
+    """Live check 6 in miniature: a `session_end` stop, then logoff, shutdown, boot and logon backfilled from both logs."""
+    stop = _T0 - timedelta(hours=1)
+    unlock = stop - timedelta(minutes=30)
+    _put(EventType.COLLECTOR_START, stop - timedelta(hours=1), reason="launch")
+    _put(EventType.UNLOCK, unlock, Source.EVENTLOG, detail=_UNLOCK)
+    _put(EventType.COLLECTOR_STOP, stop, reason="session_end")
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _history(log)
+    logoff, shutdown = stop + timedelta(seconds=10), stop + timedelta(seconds=20)
+    booted, logon = stop + timedelta(minutes=2), stop + timedelta(minutes=3)
+    log.winlogon(_sens(3, logoff))
+    log.system(_fixture("eventlog-6006.xml", shutdown))
+    log.system(_boot_start(booted))
+    log.winlogon(_sens(2, logon))
+    _run(cfg, clock, log, 1)
+
+    shape = [(i.kind, i.start, i.end, str(i.confidence)) for i in replay(_ledger()).intervals]
+    assert shape[1:] == [
+        (IntervalType.PRESENT, unlock, stop, "observed"),
+        (IntervalType.PRESENT, stop, logoff, "inferred"),
+        (IntervalType.AWAY, logoff, shutdown, "inferred"),
+        (IntervalType.OFF, shutdown, booted, "inferred"),
+        (IntervalType.AWAY, booted, logon, "inferred"),
+        (IntervalType.PRESENT, logon, _T0, "inferred"),
+        (IntervalType.PRESENT, _T0, _tick(1), "observed"),
+        (IntervalType.DOWNTIME, _tick(1), None, "observed"),
+    ]
+
+
+def test_an_uncovered_gap_with_the_boot_time_line_is_off_up_to_the_boot_then_away(cfg):
+    stop = _T0 - timedelta(hours=1)
+    _put(EventType.COLLECTOR_START, stop - timedelta(hours=1), reason="launch")
+    _put(EventType.COLLECTOR_STOP, stop, reason="session_end")
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    log.unreadable.add(WINLOGON_CHANNEL)
+    booted = _T0 - timedelta(minutes=40)
+    _run(cfg, clock, log, 1, boot_time=lambda: booted)
+
+    shape = [(i.kind, i.start, i.end, str(i.confidence)) for i in replay(_ledger()).intervals]
+    assert shape[1:3] == [
+        (IntervalType.OFF, stop, booted, "inferred"),
+        (IntervalType.AWAY, booted, _T0, "inferred"),
+    ]
+
+
+def test_replay_and_the_collector_agree_on_the_deliberate_stops():
+    assert {str(reason) for reason in daemon.DELIBERATE_STOPS} == DELIBERATE_REASONS

@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 42, 15 October 2026 (phase 3 step 6a: the System log read every tick behind a cursor, coverage for gaps between runs, =boot= from =boot_time()= written by the collector).
+*Last revised:* week 42, 16 October 2026 (phase 3 step 6b: replay reads coverage, reconstructs covered gaps, =off= and =away= from boot records, the downtime rules, a stop never downgrades the interval it closes).
 
 
 * 1. Purpose and Scope
@@ -293,7 +293,7 @@ Replay emits non-overlapping intervals:
 | =unevidenced= | Awake and unlocked with no evidence yet: a resume on an unlocked session before any input |
 | =downtime= | Collector not observing. State unknown, never rendered as presence or absence |
 
-Every interval carries =confidence= (=observed= or =inferred=) from its boundary events; an interval inside a reconstructed gap is =inferred=. Adjacent intervals of the same type and confidence merge. Zero-length intervals are dropped. Intervals are stored and derived in UTC and split at local midnight only for day views, never in storage. A DST change (25 October 2026) moves no stored timestamp.
+Every interval carries =confidence= (=observed= or =inferred=) from its boundary events, except that a =collector_stop= closing an interval never makes it =inferred= (section 8); an interval inside a reconstructed or folded gap is =inferred=. Adjacent intervals of the same type and confidence merge. Zero-length intervals are dropped. Intervals are stored and derived in UTC and split at local midnight only for day views, never in storage. A DST change (25 October 2026) moves no stored timestamp.
 
 Legacy days. Phase 2 shards carry no lock, unlock, suspend or resume events and replay reads them without error. A legacy =collector_stop= with reason =suspended= followed by =collector_start= with reason =resumed= is read as an inferred =suspend= and =resume=. Legacy collector liveness with no session events becomes =unevidenced=, never =present=.
 
@@ -399,12 +399,25 @@ Backfill, every gap. For every gap between runs that is not deliberate, the Syst
 
 When the gap is not fully covered (any of the four coverage flags false) and =boot_time()= falls inside it, the collector also writes =boot=, source =collector=, =detail= =boot_time=, =boot_kind= =start=, at that time: the collector is the only side that can read =boot_time()=, and rule 1 below reads the line.
 
-Reconstruction. When both channels were readable and both reach back to the start of the gap, the gap is reconstructed from them: the state before the gap carries through unless a backfilled record changes it, and every interval inside the gap is =inferred=. No =downtime= is emitted for it.
+Replay's governing rule for every gap: it may lose evidence, but it never invents presence and never downgrades an observation.
+
+Which note covers a gap. Replay reads only the coverage notes' =data= fields. A note covers a gap when all four flags are =true= and its span contains the gap, from the stop to the next =collector_start=; a note for a shorter span does not count. A gap with no such note is uncovered, including one a note calls partly covered. A gap after a deliberate stop is =downtime= whatever any note or rule below says.
+
+Reconstruction. When both channels were readable and both reach back to the start of the gap, the gap is reconstructed from them: the state before the gap carries through unless a backfilled record changes it, and every interval inside the gap is =inferred=.
+
+- A shutdown record (EventLog 6006, Kernel-General 13) makes the machine =off=.
+- After any boot start, from a start record (EventLog 6005, Kernel-General 12) or from the collector's =boot_time()= line, the machine is up on the sign-in screen: =away= until an =unlock=. A boot start straight after another, with no record between them, is the same start.
+- A boot start with no shutdown record before it, since the gap's start or the last shutdown, means the machine went down at a time no record shows (a power loss or a crash). The stretch from the last record before that boot, or from the gap's start when there is none, up to the boot is =downtime=, not reconstructed.
+- Apart from that, no =downtime= is emitted for a reconstructed gap.
+
+Confidence at a gap's edge. A =collector_stop= says the collector stopped observing, not that the user's state changed, so an interval it closes keeps the confidence its opening boundary gives it: presence observed up to an =unclean= stop stays =observed=, and the reconstructed part after it is a separate =inferred= interval. Intervals merge only when type and confidence both match.
+
+A further =collector_stop= inside a gap that is not =downtime= is dropped, so it cannot end the reconstruction.
 
 Downtime, only where neither log covers. For the stretches the backfill cannot cover (a channel unreadable, the gap beyond retention, a WTS-only run), rules in order:
 
-1. A =boot= from =boot_time()= falls inside the stretch (written by the collector, above). *Machine was off.* Mark the stretch =off= up to it, =inferred=.
-2. The stretch is shorter than =absence.micro_max=. *Collector restarted.* Fold silently.
+1. The collector's =boot= from =boot_time()= falls inside the stretch (written by the collector, above). *Machine was off.* Mark the stretch =off= up to it, then =away= from it until an =unlock=, as after any boot start; all =inferred=. Only the collector's line triggers this rule: an =eventlog= boot record in an uncovered gap does not.
+2. The stretch is shorter than =absence.micro_max=. *Collector restarted.* Fold: the state before the stretch carries through it, =inferred=.
 3. Otherwise. *Collector downtime.* Leave it as =downtime=. Phase 4 queues downtime while unlocked as =unknown=, *excluded from accrual until answered*. Unobserved time is not credited.
 
 The prompt for downtime, non-blocking, drained on =c= (phase 4):

@@ -4,8 +4,10 @@ from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from timeexisting.ledger.events import Confidence, Event, EventType, Source
-from timeexisting.ledger.replay import Interval, IntervalType, day_view, replay
+from timeexisting.ledger.replay import Coverage, Interval, IntervalType, day_view, replay
 
 _CPH = ZoneInfo("Europe/Copenhagen")
 _HOST = "laptop"
@@ -16,6 +18,7 @@ INF = Confidence.INFERRED
 PRESENT = IntervalType.PRESENT
 AWAY = IntervalType.AWAY
 ASLEEP = IntervalType.ASLEEP
+OFF = IntervalType.OFF
 UNEVIDENCED = IntervalType.UNEVIDENCED
 DOWNTIME = IntervalType.DOWNTIME
 
@@ -81,8 +84,30 @@ def iv(
     return Interval(kind, begin, end, host, confidence, source)
 
 
-def intervals(*events: Event) -> tuple[Interval, ...]:
-    return replay(events).intervals
+def boot(ts: datetime, kind: str, source: Source = Source.EVENTLOG, detail: str | None = None) -> Event:
+    if detail is None:
+        detail = (
+            "boot_time"
+            if source is Source.COLLECTOR
+            else f"System EventLog {6005 if kind == 'start' else 6006}"
+        )
+    return _event(ts, EventType.BOOT, source, detail=detail, boot_kind=kind)
+
+
+def covered(span_start: datetime, span_end: datetime, **flags: bool) -> Event:
+    """The coverage note the collector writes at the start that ends the gap; every flag true unless given."""
+    values = {
+        "system_readable": True,
+        "system_reaches_back": True,
+        "winlogon_readable": True,
+        "winlogon_reaches_back": True,
+    } | flags
+    data = Coverage(span_start=span_start, span_end=span_end, **values).data()
+    return _event(span_end, EventType.NOTE, Source.COLLECTOR, **data)
+
+
+def intervals(*events: Event, micro_max: timedelta = timedelta()) -> tuple[Interval, ...]:
+    return replay(events, micro_max=micro_max).intervals
 
 
 def present_time(timeline: tuple[Interval, ...], begin: datetime, end: datetime) -> timedelta:
@@ -200,7 +225,7 @@ def test_unclean_stop_is_downtime_from_the_checkpoint_to_the_next_start():
         start(_t(13, 10, 20)),
     ) == (
         iv(UNEVIDENCED, _t(13, 8, 0), _t(13, 8, 1), Source.COLLECTOR),
-        iv(PRESENT, _t(13, 8, 1), _t(13, 10, 0), Source.EVENTLOG, INF),
+        iv(PRESENT, _t(13, 8, 1), _t(13, 10, 0)),
         iv(DOWNTIME, _t(13, 10, 0), _t(13, 10, 20), Source.COLLECTOR, INF),
         iv(UNEVIDENCED, _t(13, 10, 20), None, Source.COLLECTOR),
     )
@@ -513,6 +538,290 @@ def test_a_clock_suspend_with_no_eventlog_partner_keeps_its_inferred_time():
         iv(ASLEEP, _t(13, 12, 0), _t(13, 13, 0), Source.CLOCK, INF),
         iv(AWAY, _t(13, 13, 0), None, Source.CLOCK, INF),
     )
+
+
+# Gaps between runs (roadmap section 8): reconstruction, `off`, folding, downtime.
+
+
+def test_a_gap_both_logs_cover_carries_the_state_through_and_applies_the_records_inside():
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "unclean", INF),
+        lock(_t(13, 10, 5)),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(PRESENT, gap_start, _t(13, 10, 5), Source.COLLECTOR, INF),
+        iv(AWAY, _t(13, 10, 5), gap_end, Source.EVENTLOG, INF),
+        iv(AWAY, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_every_interval_inside_a_reconstructed_gap_is_inferred_and_its_edges_split_the_interval():
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "session_end"),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(PRESENT, gap_start, gap_end, Source.COLLECTOR, INF),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_a_probe_unlock_at_start_pairs_with_the_backfilled_unlock_inside_a_reconstructed_gap():
+    gap_start, gap_end = _t(13, 9, 0), _t(13, 9, 10)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        lock(_t(13, 8, 30)),
+        stop(gap_start, "unclean", INF),
+        unlock(_t(13, 9, 5)),
+        start(gap_end),
+        unlock(gap_end, Source.PROBE, INF),
+        covered(gap_start, gap_end),
+    )
+    assert timeline[-4:] == (
+        iv(AWAY, _t(13, 8, 30), gap_start),
+        iv(AWAY, gap_start, _t(13, 9, 5), Source.COLLECTOR, INF),
+        iv(PRESENT, _t(13, 9, 5), gap_end, Source.EVENTLOG, INF),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_a_sleep_carries_through_a_reconstructed_gap_to_its_resume():
+    gap_start, gap_end = _t(13, 9, 5), _t(13, 9, 40)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        lock(_t(13, 8, 0)),
+        suspend(_t(13, 9, 0)),
+        stop(gap_start, "unclean", INF),
+        resume(_t(13, 9, 30)),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    )
+    assert timeline[-4:] == (
+        iv(ASLEEP, _t(13, 9, 0), gap_start),
+        iv(ASLEEP, gap_start, _t(13, 9, 30), Source.COLLECTOR, INF),
+        iv(AWAY, _t(13, 9, 30), gap_end, Source.EVENTLOG, INF),
+        iv(AWAY, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_a_reboot_inside_a_reconstructed_gap_is_off_then_away_until_the_logon():
+    gap_start, gap_end = _t(13, 17, 0), _t(13, 17, 4)
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "session_end"),
+        lock(_t(13, 17, 0, 10), detail="Winlogon/Operational 811 Sens 3"),
+        boot(_t(13, 17, 0, 20), "stop"),
+        boot(_t(13, 17, 2), "start"),
+        unlock(_t(13, 17, 3)),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(PRESENT, gap_start, _t(13, 17, 0, 10), Source.COLLECTOR, INF),
+        iv(AWAY, _t(13, 17, 0, 10), _t(13, 17, 0, 20), Source.EVENTLOG, INF),
+        iv(OFF, _t(13, 17, 0, 20), _t(13, 17, 2), Source.EVENTLOG, INF),
+        iv(AWAY, _t(13, 17, 2), _t(13, 17, 3), Source.EVENTLOG, INF),
+        iv(PRESENT, _t(13, 17, 3), gap_end, Source.EVENTLOG, INF),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_a_boot_with_no_shutdown_record_in_a_reconstructed_gap_is_downtime_up_to_it():
+    # A covered gap holding only a Kernel-General 12 and an EventLog 6005, then the logon: the machine went down at a time no record shows.
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    booted, logon = _t(13, 10, 12), _t(13, 10, 15)
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "unclean", INF),
+        boot(booted, "start", detail="System Microsoft-Windows-Kernel-General 12"),
+        boot(booted + timedelta(seconds=4), "start"),
+        unlock(logon),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(DOWNTIME, gap_start, booted, Source.COLLECTOR, INF),
+        iv(AWAY, booted, logon, Source.EVENTLOG, INF),
+        iv(PRESENT, logon, gap_end, Source.EVENTLOG, INF),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_a_boot_with_no_shutdown_record_is_downtime_from_the_last_record_before_it():
+    gap_start, gap_end = _t(13, 17, 0), _t(13, 18, 2)
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "session_end"),
+        lock(_t(13, 17, 5)),
+        boot(_t(13, 18, 0), "start"),
+        unlock(_t(13, 18, 1)),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(PRESENT, gap_start, _t(13, 17, 5), Source.COLLECTOR, INF),
+        iv(DOWNTIME, _t(13, 17, 5), _t(13, 18, 0), Source.EVENTLOG, INF),
+        iv(AWAY, _t(13, 18, 0), _t(13, 18, 1), Source.EVENTLOG, INF),
+        iv(PRESENT, _t(13, 18, 1), gap_end, Source.EVENTLOG, INF),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+@pytest.mark.parametrize(
+    "flag", ["system_readable", "system_reaches_back", "winlogon_readable", "winlogon_reaches_back"]
+)
+def test_a_partly_covered_gap_is_downtime(flag):
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "unclean", INF),
+        lock(_t(13, 10, 5)),
+        start(gap_end),
+        covered(gap_start, gap_end, **{flag: False}),
+    )
+    assert timeline[1:] == (
+        iv(DOWNTIME, gap_start, gap_end, Source.COLLECTOR, INF),
+        iv(AWAY, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_an_unreadable_coverage_note_leaves_the_gap_downtime():
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    note = _event(
+        gap_end,
+        EventType.NOTE,
+        Source.COLLECTOR,
+        kind="coverage",
+        span_start=gap_start.isoformat(),
+        span_end=gap_end.isoformat(),
+        system_readable="true",
+    )
+    timeline = intervals(start(_t(13, 8, 0)), stop(gap_start, "unclean", INF), start(gap_end), note)
+    assert [interval.kind for interval in timeline] == [UNEVIDENCED, DOWNTIME, UNEVIDENCED]
+
+
+def test_a_coverage_note_for_a_shorter_span_does_not_cover_the_gap():
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        stop(gap_start, "unclean", INF),
+        start(gap_end),
+        covered(gap_start + timedelta(minutes=1), gap_end),
+    )
+    assert [interval.kind for interval in timeline] == [UNEVIDENCED, DOWNTIME, UNEVIDENCED]
+
+
+@pytest.mark.parametrize("reason", ["stop_file", "signal", "console_close", "max_ticks"])
+def test_a_deliberate_gap_is_never_reconstructed_or_folded(reason):
+    gap_start, gap_end = _t(13, 9, 0), _t(13, 9, 5)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, reason),
+        unlock(_t(13, 9, 1)),
+        boot(_t(13, 9, 2), "start", Source.COLLECTOR),
+        start(gap_end),
+        covered(gap_start, gap_end),
+        micro_max=timedelta(minutes=10),
+    )
+    assert timeline == (
+        iv(PRESENT, _t(13, 8, 0), gap_start),
+        iv(DOWNTIME, gap_start, gap_end, Source.COLLECTOR),
+        iv(PRESENT, gap_end, None, Source.COLLECTOR),
+    )
+
+
+def test_an_uncovered_gap_with_the_boot_time_line_is_off_up_to_it_then_away_until_an_unlock():
+    # micro_max plays no part: after any boot start the machine shows the sign-in screen.
+    assert intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(_t(13, 10, 0), "unclean", INF),
+        boot(_t(13, 10, 30), "start", Source.COLLECTOR),
+        unlock(_t(13, 10, 40)),
+        start(_t(13, 11, 0)),
+    ) == (
+        iv(PRESENT, _t(13, 8, 0), _t(13, 10, 0)),
+        iv(OFF, _t(13, 10, 0), _t(13, 10, 30), Source.COLLECTOR, INF),
+        iv(AWAY, _t(13, 10, 30), _t(13, 10, 40), Source.COLLECTOR, INF),
+        iv(PRESENT, _t(13, 10, 40), _t(13, 11, 0), Source.EVENTLOG, INF),
+        iv(PRESENT, _t(13, 11, 0), None, Source.COLLECTOR),
+    )
+
+
+def test_an_eventlog_boot_record_in_an_uncovered_gap_is_not_the_boot_time_rule():
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        stop(_t(13, 10, 0), "unclean", INF),
+        boot(_t(13, 10, 30), "start"),
+        start(_t(13, 11, 0)),
+    )
+    assert timeline[1] == iv(DOWNTIME, _t(13, 10, 0), _t(13, 11, 0), Source.COLLECTOR, INF)
+
+
+@pytest.mark.parametrize(
+    ("length", "micro_max", "folded"),
+    [
+        (timedelta(minutes=9, seconds=59), timedelta(minutes=10), True),
+        (timedelta(minutes=10), timedelta(minutes=10), False),
+        (timedelta(minutes=1), timedelta(), False),
+    ],
+)
+def test_an_uncovered_gap_shorter_than_micro_max_folds_carrying_the_state(length, micro_max, folded):
+    gap_start = _t(13, 10, 0)
+    gap_end = gap_start + length
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "unclean", INF),
+        start(gap_end),
+        micro_max=micro_max,
+    )
+    if folded:
+        assert timeline == (
+            iv(PRESENT, _t(13, 8, 0), gap_start),
+            iv(PRESENT, gap_start, gap_end, Source.COLLECTOR, INF),
+            iv(PRESENT, gap_end, None, Source.COLLECTOR),
+        )
+    else:
+        assert [interval.kind for interval in timeline] == [PRESENT, DOWNTIME, UNEVIDENCED]
+
+
+def test_a_further_stop_inside_a_reconstructed_gap_does_not_end_it():
+    gap_start, gap_end = _t(13, 10, 0), _t(13, 10, 20)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(gap_start, "session_end"),
+        stop(_t(13, 10, 5), "unclean", INF),
+        start(gap_end),
+        covered(gap_start, gap_end),
+    )
+    assert DOWNTIME not in [interval.kind for interval in timeline]
+    assert timeline[-1] == iv(PRESENT, gap_end, None, Source.COLLECTOR)
+
+
+def test_a_gap_still_open_is_downtime_whatever_micro_max_says():
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(_t(13, 10, 0), "unclean", INF),
+        micro_max=timedelta(hours=1),
+    )
+    assert timeline[-1] == iv(DOWNTIME, _t(13, 10, 0), None, Source.COLLECTOR, INF)
 
 
 # Phase 2 legacy shapes.

@@ -28,6 +28,34 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-16, phase 3 step 6b: gaps between runs in replay
+
+*Asked:* the replay side of step 6 of =docs/phase-3-prompt.md=, on =phase-3/step-6b-replay=: read the coverage notes, reconstruct covered gaps carrying the prior state through as =inferred=, =off= from boot records, and the downtime rules.
+
+*Done:*
+- =ledger/replay.py=: before building the timeline, each gap between runs is planned from its stop, its records and the coverage notes, and its stop and boot records take the matching step: =downtime= after a deliberate stop; reconstruction when a note covers the gap; =off= then =away= from the collector's =boot_time()= line in an uncovered gap; a fold, carrying the state through, for an uncovered gap shorter than =micro_max=; =downtime= otherwise. The machine gains the =off= state. =Coverage.covers(start, end)= is the reconstruction condition. =replay()= takes =micro_max= as a keyword, defaulting to zero, which folds nothing.
+- =DELIBERATE_REASONS= in replay, which may not import the collector, pinned equal to =daemon.DELIBERATE_STOPS= by a test.
+- Roadmap section 8 written for the decisions below; the section 6 confidence sentence amended for decision 6.
+- Tests: the pure cases in =test_presence_model.py= (reconstruction, a sleep and a probe unlock carried through a gap, a reboot, a boot with no shutdown record from the gap start and from the last record, partly covered and unreadable notes, a note for a shorter span, deliberate stops, the =boot_time()= line, folding at the =micro_max= edge, a further stop, an open gap), and in =test_reconcile.py= a reboot both logs cover and an uncovered gap with the =boot_time()= line, both through the real collector and parser. The pinned 6a ledger test is now =test_the_collector_ledger_through_replay=: its gap is reconstructed, with presence observed up to the crash and inferred from it to the backfilled lock, and no =downtime=. Its old docstring named a backfilled sleep in the gap; the fixture holds none, and the docstring was corrected.
+- After review: an interval opened inside a reconstructed gap is =inferred=, including the =downtime= before a boot start with no shutdown record, which had taken the observed confidence of the record it opens at.
+- 1041 tests, up from 1014; =ruff format --check .= and =ruff check .= clean.
+
+*Decided after review:*
+1. The governing rule: replay may lose evidence but must never invent presence or downgrade an observation.
+2. After any boot start, from an =eventlog= start record or the collector's =boot_time()= line, the stretch is =away= until an =unlock=. The first draft folded or left as =downtime= what followed the =boot_time()= line, by =micro_max=; dropped.
+3. Only the collector's =boot_time()= line triggers =off= in an uncovered gap.
+4. A coverage note counts when its span contains the gap.
+5. A further stop inside a gap that is not =downtime= is dropped.
+6. Intervals merge only when type and confidence both match, and a =collector_stop= closing an interval does not make it =inferred=: presence observed up to an unclean stop stays observed, and the reconstructed part after it is a separate =inferred= interval. The first draft let the inferred stop downgrade the interval before it and merged the two. This also changes a gap that stays =downtime=: the interval before an unclean stop is now =observed= there too.
+7. In a covered gap, a boot start with no shutdown record before it, since the gap's start or the last shutdown, is =downtime=, =inferred=, from the last record before it, or the gap's start, up to the boot. A boot start straight after another with no record between them (Kernel-General 12 and EventLog 6005) is the same start.
+
+*Observed:*
+- Overnight evidence, 16 October, on the dev collector running detached: a 16-hour sleep from 15 October 16:46 to 16 October 08:46 was resolved against the System log 3 seconds after the wake.
+
+*Carried over:*
+- Step 9's =te collect timeline= must pass =cfg.absence.micro_max= to =replay=, which defaults to zero and then folds nothing. The only caller today, =cli._ledger_start=, reads collector runs, not intervals.
+- Decision 6's rule is not yet applied to inferred closing boundaries such as a =clock= =suspend=: presence stays =observed= up to the last tick before the suspend, and only the stretch from that tick to the inferred boundary is =inferred=. Same rule, not an open question.
+
 ** 2026-10-15, phase 3 step 6a: event log reconciliation in the collector
 
 *Asked:* step 6 of =docs/phase-3-prompt.md=, split in two after review; this is 6a, the collector side, on =phase-3/step-6-reconcile=: pending sleep gaps resolved against the System log, Winlogon/Operational reconciliation each tick behind a checkpoint cursor, backfill of every non-deliberate gap, the coverage note. 6b (replay: coverage, reconstruction, =off=, the downtime rules) follows separately.

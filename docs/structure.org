@@ -25,7 +25,7 @@ The original =TimeExisting.py= collapsed all three into one file with nothing to
 #+begin_src text
 te/
 ├── pyproject.toml            the project's single build and tooling manifest
-├── README.org                front door for humans
+├── README.md                 front door for humans
 ├── CLAUDE.md                 front door for implementing agents
 ├── .gitignore                what git must never see
 ├── .gitattributes            how git stores line endings
@@ -89,9 +89,9 @@ The single manifest for building, installing and checking the project. Four thin
 - =[project.optional-dependencies]= holds the one extra, =dev=, for ruff, pytest and pre-commit: =pip install -e ".[dev]"=.
 - =[tool.ruff]= and =[tool.pytest.ini_options]= configure the linter and the test runner, so neither needs its own file.
 
-The =readme= entry names =README.org= with an explicit content type, because hatchling only recognises =.md=, =.rst= and =.txt= by extension.
+The =readme= entry names =README.md=; hatchling takes its content type, =text/markdown=, from the extension.
 
-** =README.org= and =CLAUDE.md=
+** =README.md= and =CLAUDE.md=
 
 Two front doors for two readers. The README is for a human arriving at the repository. =CLAUDE.md= is read automatically by Claude Code at the start of every session; it points at the specification and states the handful of rules that must never be broken. It is short on purpose, because an agent reads it cold every time.
 
@@ -141,7 +141,7 @@ After that, =import timeexisting= works from any directory, =te= works from any 
 
 * 8. Reading order for a newcomer
 
-1. =README.org=, one minute.
+1. =README.md=, one minute.
 2. This file.
 3. =timeexisting-roadmap.org= sections 3 and 4, the architecture and the schedule model.
 4. =src/timeexisting/domain/=, in the order =clock=, =segments=, =schedule=, =resolver=.

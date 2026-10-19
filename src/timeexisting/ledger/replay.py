@@ -1,4 +1,4 @@
-"""Replay the ledger into a timeline (roadmap sections 5 and 6), per host: the typed intervals of the presence model, plus the collector's own runs and the gaps between them.
+"""Replay the ledger into a timeline (roadmap sections 5, 6 and 8), per host: the typed intervals of the presence model, plus the collector's own runs and the gaps between them.
 
 Pure. No clock, no I/O, no Rich: the caller reads the ledger and hands the events in. Nothing is classified here; a gap carries the reason its opening stop recorded and nothing more.
 """
@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import Enum, StrEnum, auto
 
 from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source
+from timeexisting.presence.eventlog import BootKind
 
 _BOOLEANS = {"true": True, "false": False}
 
@@ -26,7 +27,7 @@ class IntervalType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Interval:
-    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when either boundary was inferred; `source` is the opening boundary's."""
+    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when the opening boundary was inferred, the closing one was an inferred transition rather than a stop, or the interval lies inside a gap replay reconstructed or folded; `source` is the opening boundary's."""
 
     kind: IntervalType
     start: datetime
@@ -91,6 +92,17 @@ class Coverage:
             "winlogon_reaches_back": _flag(self.winlogon_reaches_back),
         }
 
+    def covers(self, start: datetime, end: datetime) -> bool:
+        """Whether both channels were readable and reach back, and the span holds `start` to `end`: the condition for reconstructing that gap (roadmap section 8). A partly covered gap counts as uncovered."""
+        return (
+            self.system_readable
+            and self.system_reaches_back
+            and self.winlogon_readable
+            and self.winlogon_reaches_back
+            and self.span_start <= start
+            and end <= self.span_end
+        )
+
 
 def _flag(value: bool) -> str:
     return "true" if value else "false"
@@ -127,6 +139,7 @@ def read_coverage(event: Event) -> Coverage | None:
 class _Machine(Enum):
     AWAKE = auto()
     ASLEEP = auto()
+    OFF = auto()
     UNKNOWN = auto()
 
 
@@ -138,7 +151,15 @@ class _Session(Enum):
 
 class _Step(Enum):
     START = auto()
+    # Observation is lost: a stop whose gap is not reconstructed, or inside a reconstructed gap the last record before a boot that no shutdown record precedes.
     STOP = auto()
+    # A stop whose gap is reconstructed from the event logs, or folded: the state before it carries through.
+    CARRY = auto()
+    # A stop whose gap the logs do not cover but which holds the collector's `boot_time()` line: the machine was off up to it.
+    SHUTDOWN = auto()
+    # Boot records inside a reconstructed gap, and the collector's `boot_time()` line.
+    BOOT_STOP = auto()
+    BOOT_START = auto()
     LOCK = auto()
     UNLOCK = auto()
     SUSPEND = auto()
@@ -158,9 +179,16 @@ _STEP_OF = {
 _SESSION_EVENTS = {EventType.LOCK, EventType.UNLOCK}
 _MACHINE_EVENTS = {EventType.SUSPEND, EventType.RESUME}
 _COLLECTOR_EVENTS = {EventType.COLLECTOR_START, EventType.COLLECTOR_STOP, EventType.INPUT}
+_BOOT_STEPS = {str(BootKind.START): _Step.BOOT_START, str(BootKind.STOP): _Step.BOOT_STOP}
+# The records a reconstructed gap is read from.
+_RECORD_EVENTS = {*_SESSION_EVENTS, *_MACHINE_EVENTS, EventType.INPUT, EventType.BOOT}
+# A boundary where the collector stopped observing. It says nothing about the user, so an interval it closes keeps the confidence its other edge gives it.
+_STOP_STEPS = {_Step.STOP, _Step.CARRY, _Step.SHUTDOWN}
 # Phase 2 wrote a clock jump as a stop and start pair with these reasons (`StopReason.SUSPENDED`, `StartReason.RESUMED` in the collector); replay reads them as an inferred suspend and resume.
 _LEGACY_SUSPENDED = "suspended"
 _LEGACY_RESUMED = "resumed"
+# The stops the collector treats as user intent (`DELIBERATE_STOPS` in the collector, roadmap section 8): their gap is never reconstructed, folded or turned into `off`.
+DELIBERATE_REASONS = frozenset({"stop_file", "signal", "console_close", "max_ticks"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +204,10 @@ class _Boundary:
 
 @dataclass(slots=True)
 class _State:
-    """The three facts of the presence model (machine, session, observation) plus whether presence is evidenced."""
+    """The three facts of the presence model (machine, session, observation) plus whether presence is evidenced. `reconstructing` is true inside a gap replay reconstructs or folds: the collector is not observing, but the state carries through and is not downtime."""
 
     observing: bool = False
+    reconstructing: bool = False
     machine: _Machine = _Machine.UNKNOWN
     session: _Session = _Session.UNKNOWN
     evidenced: bool = False
@@ -187,12 +216,31 @@ class _State:
         match step:
             case _Step.START:
                 self.observing = True
+                self.reconstructing = False
                 self.machine = _Machine.AWAKE
             case _Step.STOP:
-                # Loss of observation closes presence and leaves machine and session unknown; reconstruction from the event logs (section 8) is not applied here.
+                # Loss of observation closes presence and leaves machine and session unknown.
                 self.observing = False
+                self.reconstructing = False
                 self.machine = _Machine.UNKNOWN
                 self.session = _Session.UNKNOWN
+                self.evidenced = False
+            case _Step.CARRY:
+                self.observing = False
+                self.reconstructing = True
+            case _Step.SHUTDOWN:
+                self.observing = False
+                self.reconstructing = True
+                self.machine = _Machine.OFF
+                self.evidenced = False
+            case _Step.BOOT_STOP:
+                self.machine = _Machine.OFF
+                self.evidenced = False
+            case _Step.BOOT_START:
+                # A machine that has just started shows the sign-in screen: no session is unlocked until a logon. It also ends a stretch lost to a shutdown no record shows.
+                self.reconstructing = True
+                self.machine = _Machine.AWAKE
+                self.session = _Session.LOCKED
                 self.evidenced = False
             case _Step.LOCK:
                 self.session = _Session.LOCKED
@@ -210,8 +258,10 @@ class _State:
                     self.evidenced = True
 
     def interval_type(self) -> IntervalType:
-        if not self.observing:
+        if not self.observing and not self.reconstructing:
             return IntervalType.DOWNTIME
+        if self.machine is _Machine.OFF:
+            return IntervalType.OFF
         if self.machine is _Machine.ASLEEP:
             return IntervalType.ASLEEP
         if self.session is _Session.LOCKED:
@@ -260,10 +310,96 @@ def _paired(events: Sequence[Event], kinds: set[EventType]) -> list[_Boundary]:
     return boundaries
 
 
-def _boundaries(events: Sequence[Event]) -> list[_Boundary]:
+type _Plan = dict[str, tuple[_Step, ...]]
+
+
+def _reconstructed(stop: Event, records: Sequence[Event]) -> _Plan:
+    """The steps of a gap both logs cover: the stop carries the state through, and each boot record inside applies. A boot start with no shutdown record since the gap's start or the last shutdown means the machine went down at a time no record shows: observation is lost from the last record before that boot, or from the stop when there is none, up to the boot. A boot start straight after another, with no record between them, is the same start (Kernel-General 12 and EventLog 6005)."""
+    plan: _Plan = {stop.id: (_Step.CARRY,)}
+    last: Event | None = None
+    shut_down = False
+    for record in records:
+        step = _BOOT_STEPS.get(record.data.get("boot_kind", "")) if record.event is EventType.BOOT else None
+        if record.event is EventType.BOOT and step is None:
+            continue
+        if step is _Step.BOOT_STOP:
+            shut_down = True
+        elif step is _Step.BOOT_START:
+            same_start = last is not None and plan.get(last.id, ())[:1] == (_Step.BOOT_START,)
+            if not shut_down and not same_start:
+                if last is None:
+                    plan[stop.id] = (_Step.STOP,)
+                else:
+                    plan[last.id] = (*plan.get(last.id, ()), _Step.STOP)
+            shut_down = False
+        if step is not None:
+            plan[record.id] = (step,)
+        last = record
+    return plan
+
+
+def _gap_steps(
+    stop: Event, start: Event, events: Sequence[Event], coverage: Sequence[Coverage], micro_max: timedelta
+) -> _Plan:
+    """How one gap between runs is read (roadmap section 8), as the steps its stop and records take, by event id. Empty for a gap that stays `downtime`: a deliberate stop, or an uncovered gap no rule applies to.
+
+    Covered (a coverage note says both logs were readable and reach back over the whole gap): reconstructed (`_reconstructed`). Otherwise, in order: the collector's `boot_time()` line inside the gap marks it `off` up to the boot, and `away` from the boot on, as after any boot start; a gap shorter than `micro_max` is folded, carrying the state through; anything else is `downtime`.
+    """
+    if stop.data.get("reason") in DELIBERATE_REASONS:
+        return {}
+    records = [event for event in events if stop.ts < event.ts < start.ts and event.event in _RECORD_EVENTS]
+    if any(covered.covers(stop.ts, start.ts) for covered in coverage):
+        return _reconstructed(stop, records)
+    booted = [
+        event
+        for event in records
+        if event.event is EventType.BOOT
+        and event.source is Source.COLLECTOR
+        and event.data.get("boot_kind") == BootKind.START
+    ]
+    if booted:
+        return {stop.id: (_Step.SHUTDOWN,), booted[-1].id: (_Step.BOOT_START,)}
+    if start.ts - stop.ts < micro_max:
+        return {stop.id: (_Step.CARRY,)}
+    return {}
+
+
+def _planned(events: Sequence[Event], micro_max: timedelta) -> _Plan:
+    """The steps each gap's events take, by event id: in place of a stop's or a boot's own, beside a session or machine record's. An empty tuple drops the event's boundary. A gap runs from the first `collector_stop` after a run to the next `collector_start`. A phase 2 `suspended` stop is a sleep, not a gap. A further stop inside a gap that is not `downtime` is dropped, so it cannot end the reconstruction."""
+    coverage = [covered for event in events if (covered := read_coverage(event)) is not None]
+    planned: _Plan = {}
+    opener: Event | None = None
+    further: list[Event] = []
+    for event in events:
+        if event.event is EventType.COLLECTOR_STOP and event.data.get("reason") != _LEGACY_SUSPENDED:
+            if opener is None:
+                opener = event
+            else:
+                further.append(event)
+        elif event.event is EventType.COLLECTOR_START:
+            if opener is not None:
+                steps = _gap_steps(opener, event, events, coverage, micro_max)
+                planned.update(steps)
+                if steps:
+                    planned.update(dict.fromkeys((stop.id for stop in further), ()))
+            opener = None
+            further = []
+    return planned
+
+
+def _boundaries(events: Sequence[Event], micro_max: timedelta) -> list[_Boundary]:
     """Every state change in one host's events, in the order of the times replay places them at."""
+    planned = _planned(events, micro_max)
     boundaries = _paired(events, _SESSION_EVENTS) + _paired(events, _MACHINE_EVENTS)
     for event in events:
+        if event.id in planned:
+            # Same time and id as the record's own boundary, which `_paired` put first: a stable sort keeps it first.
+            # A stop planned on a record is the last record before a boot no shutdown record precedes: the record is observed as itself, not as the moment the machine went down, so the stop is `inferred`.
+            boundaries.extend(
+                _boundary(event, step, Confidence.INFERRED if _lost_at_record(event, step) else None)
+                for step in planned[event.id]
+            )
+            continue
         if event.event not in _COLLECTOR_EVENTS:
             continue
         reason = event.data.get("reason")
@@ -276,32 +412,40 @@ def _boundaries(events: Sequence[Event]) -> list[_Boundary]:
     return sorted(boundaries, key=lambda boundary: (boundary.ts, boundary.id))
 
 
+def _lost_at_record(event: Event, step: _Step) -> bool:
+    return step is _Step.STOP and event.event is not EventType.COLLECTOR_STOP
+
+
 def _inferred_edge(boundary: _Boundary | None) -> bool:
     return boundary is not None and boundary.confidence is Confidence.INFERRED
 
 
-def _intervals(host: str, events: Sequence[Event]) -> list[Interval]:
-    """The typed timeline of one host, from its first `collector_start` on. Events before it only set the state that start inherits."""
+def _inferred_close(boundary: _Boundary | None) -> bool:
+    return _inferred_edge(boundary) and boundary is not None and boundary.step not in _STOP_STEPS
+
+
+def _intervals(host: str, events: Sequence[Event], micro_max: timedelta) -> list[Interval]:
+    """The typed timeline of one host, from its first `collector_start` on. Events before it only set the state that start inherits. A span opened inside a reconstructed or folded gap is `inferred` whatever its boundaries say, so the gap's edges split an interval of the same type. A stop that closes an interval does not make it `inferred`: presence observed up to an unclean stop stays observed."""
     state = _State()
-    spans: list[tuple[IntervalType, _Boundary, _Boundary | None]] = []
-    for boundary in _boundaries(_deduplicated(events)):
+    spans: list[tuple[IntervalType, bool, _Boundary, _Boundary | None]] = []
+    for boundary in _boundaries(_deduplicated(events), micro_max):
         state.apply(boundary.step)
         if not spans and boundary.step is not _Step.START:
             continue
         kind = state.interval_type()
-        if spans and spans[-1][0] is kind:
+        if spans and spans[-1][0] is kind and spans[-1][1] == state.reconstructing:
             continue
         if spans:
-            previous_kind, opened, _ = spans[-1]
-            spans[-1] = (previous_kind, opened, boundary)
-        spans.append((kind, boundary, None))
+            previous_kind, previous_reconstructed, opened, _ = spans[-1]
+            spans[-1] = (previous_kind, previous_reconstructed, opened, boundary)
+        spans.append((kind, state.reconstructing, boundary, None))
 
     intervals: list[Interval] = []
-    for kind, opened, closed in spans:
+    for kind, reconstructed, opened, closed in spans:
         end = None if closed is None else closed.ts
         if end == opened.ts:
             continue
-        inferred = _inferred_edge(opened) or _inferred_edge(closed)
+        inferred = reconstructed or _inferred_edge(opened) or _inferred_close(closed)
         confidence = Confidence.INFERRED if inferred else Confidence.OBSERVED
         previous = intervals[-1] if intervals else None
         if previous is not None and previous.kind is kind and previous.confidence is confidence:
@@ -339,10 +483,12 @@ def _inferred(event: Event) -> bool:
     return event.confidence is Confidence.INFERRED
 
 
-def replay(events: Iterable[Event]) -> Timeline:
+def replay(events: Iterable[Event], *, micro_max: timedelta = timedelta()) -> Timeline:
     """Derive the typed timeline (roadmap section 6) and the collector's runs. Input order is not trusted: events are sorted by `(ts, id)` first.
 
-    Typed intervals: present means awake, unlocked and evidenced. `unlock`, and `input` while awake on an unlocked session, open presence; `lock`, `suspend` and every `collector_stop` close it. A stop is a loss of observation and gives `downtime` up to the next start, except a phase 2 `suspended` stop, which with its `resumed` start reads as an inferred suspend and resume. Collector liveness with no session event is `unevidenced`, never `present`. `off` is not produced here yet: phase 3 step 6 turns `boot` records and `boot_time()` inside a gap into `off`. Live and inferred session and machine transitions take their `eventlog` partner's time, never across a `collector_stop`; repeated `eventlog` records count once.
+    Typed intervals: present means awake, unlocked and evidenced. `unlock`, and `input` while awake on an unlocked session, open presence; `lock`, `suspend` and a `collector_stop` close it. Collector liveness with no session event is `unevidenced`, never `present`. Live and inferred session and machine transitions take their `eventlog` partner's time, never across a `collector_stop`; repeated `eventlog` records count once. A phase 2 `suspended` stop with its `resumed` start reads as an inferred suspend and resume.
+
+    Gaps between runs (roadmap section 8): a gap after a deliberate stop is `downtime`, and an `unlock` inside it opens presence only from the next start. A gap a coverage note says both logs cover is reconstructed: the state before it carries through, the records inside it apply, a shutdown record makes it `off` and a start record `away` until an unlock, and every interval inside is `inferred`. Its only `downtime` is before a start record no shutdown record precedes, from the last record before that start. An uncovered gap holding the collector's `boot_time()` line is `off` up to it and `away` from it until an unlock, `inferred`. Any other uncovered gap shorter than `micro_max` is folded: the state carries through, `inferred`. Anything else is `downtime`. `micro_max` is `absence.micro_max`; the default folds nothing.
 
     Collector runs: each host's `collector_start` pairs with its next `collector_stop`, and that stop with the next start. A start followed by another start leaves the first interval unclosed (`end=None`) and produces no gap, since where it ended is unknown. A stop with no open interval produces nothing. Events of any other type are kept and ignored for pairing.
     """
@@ -383,7 +529,9 @@ def replay(events: Iterable[Event]) -> Timeline:
             presences.append(Presence(state.open_start.ts, None, host, end_inferred=False))
 
     intervals = [
-        interval for host, host_events in by_host.items() for interval in _intervals(host, host_events)
+        interval
+        for host, host_events in by_host.items()
+        for interval in _intervals(host, host_events, micro_max)
     ]
     return Timeline(
         events=ordered,

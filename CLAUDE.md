@@ -18,3 +18,9 @@ Work only inside the phase you were asked for. Do not pull features forward.
 - Python 3.14: lazy annotations are default, so no `from __future__ import annotations`.
 - Full replacement files, not fragments. One concrete step at a time, then stop for review.
 - `ruff format .`, `ruff check .` and `pytest` pass before every commit and before stopping for review.
+- Write text files with LF line endings.
+
+## The session log
+
+- Every step ends with its `docs/logs.org` entry in the same commit as the code. A step is not finished, and no PR is opened, without it.
+- When a step is reviewed and changed, the entry is updated in the same round: decisions under *Decided after review*, open follow-ups under *Carried over*.

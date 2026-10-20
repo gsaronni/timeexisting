@@ -314,7 +314,7 @@ def test_a_phase_2_shard_reads_without_a_malformed_line():
 
 
 def test_a_phase_2_shard_replays_under_the_section_6_legacy_rules():
-    # Liveness with no session events is unevidenced, never present; suspended and resumed read as an inferred sleep; every other stop is downtime to the next start.
+    # Liveness with no session events is unevidenced, never present; suspended and resumed read as an inferred sleep, observed on its awake sides; every other stop is downtime to the next start.
     def utc(day: int, hour: int, minute: int, second: int = 0) -> datetime:
         return datetime(2026, 9, day, hour, minute, second, tzinfo=UTC)
 
@@ -327,9 +327,9 @@ def test_a_phase_2_shard_replays_under_the_section_6_legacy_rules():
     observed, inferred = Confidence.OBSERVED, Confidence.INFERRED
     timeline = replay(store.read_shard(_PHASE_2_SHARD).events)
     assert timeline.intervals == (
-        interval(unevidenced, utc(21, 4, 55), utc(21, 9, 0), inferred),
+        interval(unevidenced, utc(21, 4, 55), utc(21, 9, 0), observed),
         interval(asleep, utc(21, 9, 0), utc(21, 9, 40), inferred),
-        interval(unevidenced, utc(21, 9, 40), utc(21, 13, 30, 30), inferred),
+        interval(unevidenced, utc(21, 9, 40), utc(21, 13, 30, 30), observed),
         interval(downtime, utc(21, 13, 30, 30), utc(21, 13, 45), inferred),
         interval(unevidenced, utc(21, 13, 45), utc(21, 14, 30), observed),
         interval(downtime, utc(21, 14, 30), utc(22, 4, 58), observed),

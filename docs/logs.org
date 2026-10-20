@@ -111,6 +111,42 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 - With no =WM_POWERBROADCAST= under Modern Standby, the =power= source cannot be relied on for sleep boundaries on this laptop; the System log records carry them.
 - Whether =SessionFlags= stays unlocked under the UAC secure desktop is step 10 item 8.
 
+** 2026-10-12, phase 3 step 4: event log reader
+
+Reconstructed on 19 October 2026 from the commit and PR; not written at the time.
+
+*Asked:* step 4 of =docs/phase-3-prompt.md= on =phase-3/step-4-eventlog=: a Windows backend that queries the System log and Winlogon/Operational through =win32evtlog.EvtQuery= with an XPath filter, split into a pure parser tested against hand-written XML fixtures and a thin I/O function; a startup self-check that never stops the collector; a non-Windows backend that returns nothing.
+
+*Done:*
+- Commit =e7fe14e=, PR #6, one commit (=286b99d=) squashed. The PR has no description, review or comments.
+- =presence/eventlog.py=, new, pure: =parse_system= and =parse_winlogon= turn one record's XML into a typed record (=PowerTransition=, =HibernateEntry=, =WakeReport=, =ClockChange=, =BootRecord=, =SessionRecord=), or =None= for a record outside the confirmed set; a malformed confirmed record raises =EventLogFormatError=. =system_xpath= and =winlogon_xpath= build the queries. =boundaries(records, until=)= returns =suspend=, =resume= and =boot= =Boundary= values: a 507 followed by a 506 within =CHAIN_STEP= (2 s) is a chain step; hibernation is entered at Kernel-Power 42 and woken at the Power-Troubleshooter 1 =WakeTime=, or the Kernel-General 1 Reason 2 =NewTime= of a forward change over =HIBERNATE_JUMP= (60 s), which waits =WAKE_REPORT_LAG= (30 s) for a Power-Troubleshooter 1; a record the log cannot settle yet ends the result and waits for the next read. Kernel-Power 107 and 566 are never parsed. Seven-digit =SystemTime= values are truncated to microseconds. 811 =Sens= codes 4 and 3 read as =lock=, 5 and 2 as =unlock=, every other code as neither. =Boundary.reason= holds the numeric 507 reason on a resume, for the input evidence rule.
+- =presence/eventlog_win32.py=, new: =query=, =probe= and =current_user_sid=, the only code calling =EvtQuery=. Each raises =EventLogUnavailable= on a =pywintypes.error=.
+- =presence/backend.py=, new: =ChannelCheck=, the =EventLogReader= protocol, =NoEventLog=, and =EventLog= over the three seams, which logs a failed query and reads it as nothing and skips a malformed record. A registry keyed by =sys.platform= holds only =win32=, imported lazily; an =ImportError= gives =NoEventLog=.
+- =collector/daemon.py=: =startup_check= runs once after =collector_start= and before =on_start=. An unreadable Winlogon/Operational writes one =wts_only= =note=; an unreadable System log is logged and writes nothing; a failing check is logged and the collector carries on. =run_collector= takes =event_log=; =cli.py= passes =backend.event_log()=.
+- =tests/test_architecture.py=: =presence/eventlog.py= added to the pure modules.
+- Ten hand-written fixtures under =tests/fixtures/eventlog/=: EventLog 6005 and 6006, Kernel-General 1, 12 and 13, Kernel-Power 42, 506 and 507, Power-Troubleshooter 1, Winlogon 811.
+- New tests: 45 in =test_eventlog.py=, 14 in =test_eventlog_backend.py=, 7 in =test_eventlog_win32.py=, 7 in =test_daemon.py= for the self-check.
+- Roadmap section 6: three bullets on the hibernate wake, below.
+
+*Observed:* recorded in roadmap section 6 by this commit. A Kernel-General 1 Reason 2 change is also written at hibernation entry, so only a forward change over 60 s counts as a wake. At step 4, on each of the four hibernate wakes, the Power-Troubleshooter 1 was written about 4.5 s after the clock change (0.5 to 2.5 s after its own =WakeTime=). On all four, a 506 with reason 20 and a 507 with reason 15 appeared about 2 s after the clock change and 0.2 s apart; read as a sleep, the pair started each wake 2 s early and added a 0.2 s false sleep, so it is dropped.
+
+*Carried over:* the 811 code mapping is pinned by a fixture test only. Per the code comment on =_SENS_CODES=, the step 5 live check confirms it before the collector reads the channel; in this commit the collector runs the self-check and reads no records.
+
+** 2026-10-12, phase 3 step 3: the pure presence model
+
+Reconstructed on 19 October 2026 from the commit and PR; not written at the time.
+
+*Asked:* step 3 of =docs/phase-3-prompt.md= on =phase-3/step-3-presence=: rewrite the presence derivation in replay to emit the typed timeline, pure, synthetic fixtures only, with the named cases (plain day, dark wakes, lock then sleep, unclean stop, midnight, DST end, 26 September, timestamp authority, every phase 2 legacy shape).
+
+*Done:*
+- Commit =e647e87=, PR #5, one commit (=fa6fc28=) squashed. The PR has no description, review or comments.
+- =ledger/replay.py=: =IntervalType= (=present=, =away=, =asleep=, =off=, =unevidenced=, =downtime=), =Interval= (kind, start, end, host, confidence, source) and =Timeline.intervals=. A private state of machine, session, observation and evidence, driven by boundaries in time order. =unlock=, and =input= while awake on an unlocked session, open presence; =lock=, =suspend= and every =collector_stop= close it, and a stop gives =downtime= up to the next start. Session and machine transitions pair by sequence with their =eventlog= partner and take its time, never across a =collector_stop= (=_paired=). Repeated =eventlog= records are dropped on event type, full-precision time and =detail= (=_deduplicated=). A phase 2 =suspended= stop and =resumed= start read as an inferred suspend and resume. An interval is =inferred= when either boundary is; adjacent intervals of the same type and confidence merge; zero-length ones are dropped. =day_view= clips intervals to a local day; storage is never split. =Timeline.presences= stays, documented as collector liveness that feeds the start suggestion.
+- =tests/test_presence_model.py=, new, 39 tests: the plain day, both dark wakes, input from a wake reason and on a locked or sleeping session, lock then sleep then unlock, unclean stop and every stop closing presence, midnight and the day view, DST end on 25 October 2026, 26 September synthetic and on a phase 2 shard, timestamp authority (=wts=, =probe=, =power=, =clock=, duplicates), the legacy shapes, merging, hosts.
+- =tests/test_replay.py=: the empty timeline gains =intervals=; =test_a_phase_2_shard_replays_to_the_phase_2_result= became =test_a_phase_2_shard_replays_under_the_section_6_legacy_rules=, asserting the intervals and no =present=.
+- Roadmap section 6, timestamp authority: a =collector_stop= ends every run, so a startup probe after a restart is never absorbed by a record from before it, while a record backfilled inside the gap still pairs with it.
+
+*Carried over:* from the code comments in this commit. =off= is not produced yet; step 6 turns =boot= records and =boot_time()= inside a gap into =off=. A stop leaves machine and session unknown; reconstruction from the event logs (section 8) is not applied. =presences= feeds the start suggestion until the section 4 start resolution replaces it.
+
 ** 2026-10-09, phase 3 step 2: event schema
 
 *Asked:* step 2 of =docs/phase-3-prompt.md= on =phase-3/step-2-schema=: the phase 3 event types and sources in one schema change, structured coverage on =note=, and tests that phase 2 shards still replay.
@@ -154,6 +190,22 @@ Prod/dev split (=chore/prod-dev-split=):
 - uv venvs on Windows ship =pythonw.exe= beside =python.exe=, so =spawn.py= finds it in a uv tool environment as it does in the venv.
 
 *Carried over:* prod v0.2.2 is installed as a uv tool (7 October). Switch the daily collector to prod: stop the venv-launched collector with the prod =te= (=te collect stop=), run =scripts\install-startup.ps1=, then start =te= from a shell without the venv. Then run =scripts\dev-setup.ps1= in the dev venv.
+
+** 2026-10-07, phase 3 step 1: spec amendments
+
+Reconstructed on 19 October 2026 from the commit and PR; not written at the time.
+
+*Asked:* step 1 of =docs/phase-3-prompt.md=: amend =docs/timeexisting-roadmap.org= sections 3, 4, 5, 6, 8, 16 and 18 to the phase 3 scope and the step 0 decisions. No code.
+
+*Done:*
+- Commit =22fe310=, straight on =master=, no PR. =docs/timeexisting-roadmap.org= and =docs/phase-3-prompt.md=, 196 lines added and 51 removed. The roadmap's revision line reads week 41, 7 October 2026.
+- Section 3: the collector records session, power and event log transitions, and the viewer may write the confirmed day start. From phase 3 the checkpoint also holds the last known session state, any pending gap and the Winlogon/Operational cursor. =resumed= is a phase 2 start reason only. A clock jump over 60 s holds a pending gap resolved against the System log instead of writing a stop and start pair. The one hidden window receives session end, =WM_WTSSESSION_CHANGE= and =WM_POWERBROADCAST=; the single-writer rule; the 5 October =session_end= failure noted as an open phase 2 defect outside phase 3. The subcommand list gains =te collect status=, =stop=, =timeline= and =te config=, with =te collect timeline= described.
+- Section 4: start resolution in five rules (=--start= or a confirmed =day_start=; the first =present= instant at or after =credit.earliest=; the session logon time if today; =boot_time()= as a sanity clamp; the prompt) and the provenance labels =flag=, =prompt=, =observed=, =logon=, =inferred=.
+- Section 5: the event and source lists, an event vocabulary table, the 811 =Sens= mapping, the structured =note= kinds =coverage= and =wts_only=. "Transitions, not heartbeats" becomes "Transitions only"; presence, absence and downtime are derived by replay, never written; repeated =eventlog= records deduplicate.
+- Section 6: the detection tier table is replaced by the presence model, "Idle is never absence" with the input-evidence amendment, the typed timeline, legacy days, timestamp authority, the sources on Windows with the no-elevation rule, the System log sleep rules (506 and 507 chains, Power-Troubleshooter 1 and Kernel-General 1 for hibernate wakes, 107 never used, 566 ignored), the Winlogon 811 rules with the channel's retention, the =OpenInputDesktop= probe over two ticks, the startup probe and self-check, and the backend registry with Fedora deferred.
+- Section 8: recovery against the checkpoint: a table of how gaps arise, deliberate stops, pending sleep gaps, lock and unlock reconciliation, backfill with the coverage note, reconstruction, and the downtime rules (=boot_time()= gives =off=, a stretch under =absence.micro_max= folds, otherwise =downtime=).
+- Section 10's reference to section 8 updated. Section 16's phase 3 row rewritten. Section 18 gains the Fedora backend, holiday exclusion in ={remaining_week}=, ledger backup, and Teams presence with its own subsection.
+- =docs/phase-3-prompt.md=, same commit: step 2 adds =day_start= and the source =user=, so the schema changes once; step 3 extends timestamp authority to =power= and =clock= for the machine, with two more tests; step 6 replaces "the event log result refines nothing in the ledger ... One pair per sleep" with writing the =eventlog= pair as well and letting replay pair them; step 8 gains two tests (an =unlock= at 06:50 gives 07:00; an =unlock= at 02:00, =lock= at 02:10 and =unlock= at 08:55 give 08:55).
 
 ** 2026-10-06, phase 3 step 0: evidence inventory
 

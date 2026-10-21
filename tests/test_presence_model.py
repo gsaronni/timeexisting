@@ -381,9 +381,9 @@ def test_26_september_on_a_phase_2_shard_gives_zero_present_time():
     )
     assert present_time(timeline, sep(25, 8, 0), sep(26, 12, 0)) == timedelta()
     assert timeline == (
-        iv(UNEVIDENCED, sep(25, 8, 0), sep(25, 18, 5), Source.COLLECTOR, INF),
+        iv(UNEVIDENCED, sep(25, 8, 0), sep(25, 18, 5), Source.COLLECTOR),
         iv(ASLEEP, sep(25, 18, 5), sep(26, 8, 40), Source.COLLECTOR, INF),
-        iv(UNEVIDENCED, sep(26, 8, 40), None, Source.COLLECTOR, INF),
+        iv(UNEVIDENCED, sep(26, 8, 40), None, Source.COLLECTOR),
     )
 
 
@@ -534,9 +534,80 @@ def test_a_clock_suspend_with_no_eventlog_partner_keeps_its_inferred_time():
         resume(_t(13, 13, 0), Source.CLOCK, INF),
     )
     assert timeline == (
-        iv(AWAY, _t(13, 8, 0), _t(13, 12, 0), Source.EVENTLOG, INF),
+        iv(AWAY, _t(13, 8, 0), _t(13, 12, 0)),
         iv(ASLEEP, _t(13, 12, 0), _t(13, 13, 0), Source.CLOCK, INF),
-        iv(AWAY, _t(13, 13, 0), None, Source.CLOCK, INF),
+        iv(AWAY, _t(13, 13, 0), None, Source.CLOCK),
+    )
+
+
+# A clock jump's boundaries sit on collector ticks: observed on the awake side, inferred on the sleeping side.
+
+
+def test_a_clock_only_sleep_in_the_middle_of_presence_is_inferred_only_while_asleep():
+    # The suspend is the last tick before the jump and the resume the first tick after it; only the stretch between them is inferred.
+    timeline = intervals(
+        start(_t(19, 8, 0)),
+        unlock(_t(19, 8, 1), Source.WTS),
+        suspend(_t(19, 10, 0), Source.CLOCK, INF),
+        resume(_t(19, 10, 45), Source.CLOCK, INF),
+        lock(_t(19, 11, 30), Source.WTS),
+    )
+    assert timeline == (
+        iv(UNEVIDENCED, _t(19, 8, 0), _t(19, 8, 1), Source.COLLECTOR),
+        iv(PRESENT, _t(19, 8, 1), _t(19, 10, 0), Source.WTS),
+        iv(ASLEEP, _t(19, 10, 0), _t(19, 10, 45), Source.CLOCK, INF),
+        iv(UNEVIDENCED, _t(19, 10, 45), _t(19, 11, 30), Source.CLOCK),
+        iv(AWAY, _t(19, 11, 30), None, Source.WTS),
+    )
+
+
+def test_observed_presence_on_both_sides_of_a_short_clock_sleep_stays_two_intervals():
+    timeline = intervals(
+        start(_t(19, 8, 0)),
+        unlock(_t(19, 8, 0)),
+        suspend(_t(19, 10, 0), Source.CLOCK, INF),
+        resume(_t(19, 10, 2), Source.CLOCK, INF),
+        user_input(_t(19, 10, 2)),
+    )
+    assert timeline == (
+        iv(PRESENT, _t(19, 8, 0), _t(19, 10, 0)),
+        iv(ASLEEP, _t(19, 10, 0), _t(19, 10, 2), Source.CLOCK, INF),
+        iv(PRESENT, _t(19, 10, 2), None, Source.WIN32),
+    )
+
+
+def test_a_clock_pair_later_paired_with_eventlog_records_takes_their_times():
+    # The System records were appended after the clock pair; replay pairs them by sequence and the eventlog times win. The 506 is before the last tick, as under Modern Standby.
+    timeline = intervals(
+        start(_t(19, 8, 0)),
+        unlock(_t(19, 8, 0)),
+        suspend(_t(19, 9, 58)),
+        suspend(_t(19, 10, 0), Source.CLOCK, INF),
+        resume(_t(19, 10, 44)),
+        resume(_t(19, 10, 45), Source.CLOCK, INF),
+    )
+    assert timeline == (
+        iv(PRESENT, _t(19, 8, 0), _t(19, 9, 58)),
+        iv(ASLEEP, _t(19, 9, 58), _t(19, 10, 44)),
+        iv(UNEVIDENCED, _t(19, 10, 44), None),
+    )
+
+
+def test_a_phase_2_sleep_in_the_middle_of_presence_is_inferred_only_while_asleep():
+    # The phase 2 pair has the same tick semantics: the suspended stop at the last tick before the jump, the resumed start at the first tick after it.
+    timeline = intervals(
+        start(_t(19, 8, 0)),
+        unlock(_t(19, 8, 1)),
+        stop(_t(19, 10, 0), "suspended", INF),
+        start(_t(19, 10, 45), "resumed"),
+        lock(_t(19, 11, 30)),
+    )
+    assert timeline == (
+        iv(UNEVIDENCED, _t(19, 8, 0), _t(19, 8, 1), Source.COLLECTOR),
+        iv(PRESENT, _t(19, 8, 1), _t(19, 10, 0)),
+        iv(ASLEEP, _t(19, 10, 0), _t(19, 10, 45), Source.COLLECTOR, INF),
+        iv(UNEVIDENCED, _t(19, 10, 45), _t(19, 11, 30), Source.COLLECTOR),
+        iv(AWAY, _t(19, 11, 30), None),
     )
 
 
@@ -840,9 +911,9 @@ def test_legacy_suspended_and_resumed_read_as_an_inferred_sleep():
         stop(_t(13, 12, 0), "suspended", INF),
         start(_t(13, 12, 40), "resumed"),
     ) == (
-        iv(UNEVIDENCED, _t(13, 8, 0), _t(13, 12, 0), Source.COLLECTOR, INF),
+        iv(UNEVIDENCED, _t(13, 8, 0), _t(13, 12, 0), Source.COLLECTOR),
         iv(ASLEEP, _t(13, 12, 0), _t(13, 12, 40), Source.COLLECTOR, INF),
-        iv(UNEVIDENCED, _t(13, 12, 40), None, Source.COLLECTOR, INF),
+        iv(UNEVIDENCED, _t(13, 12, 40), None, Source.COLLECTOR),
     )
 
 

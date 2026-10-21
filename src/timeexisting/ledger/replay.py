@@ -27,7 +27,7 @@ class IntervalType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Interval:
-    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when the opening boundary was inferred, the closing one was an inferred transition rather than a stop, or the interval lies inside a gap replay reconstructed or folded; `source` is the opening boundary's."""
+    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when the opening boundary was inferred, the closing one was an inferred transition rather than a stop, or the interval lies inside a gap replay reconstructed or folded; `source` is the opening boundary's. A boundary from a clock jump is observed on its awake side: a clock suspend closing an interval, or a clock resume opening one, does not make it inferred."""
 
     kind: IntervalType
     start: datetime
@@ -184,6 +184,8 @@ _BOOT_STEPS = {str(BootKind.START): _Step.BOOT_START, str(BootKind.STOP): _Step.
 _RECORD_EVENTS = {*_SESSION_EVENTS, *_MACHINE_EVENTS, EventType.INPUT, EventType.BOOT}
 # A boundary where the collector stopped observing. It says nothing about the user, so an interval it closes keeps the confidence its other edge gives it.
 _STOP_STEPS = {_Step.STOP, _Step.CARRY, _Step.SHUTDOWN}
+# A boundary from a clock jump sits on a tick the collector observed with the machine awake: it is observed on that side and inferred on the sleeping side. The suspend is the last tick before the jump, so it does not make the interval it closes inferred; the wake, a `resume` or a phase 2 `resumed` start, is the first tick after it, so it does not make the interval it opens inferred. The asleep interval between them stays inferred.
+_WAKE_STEPS = {_Step.RESUME, _Step.START}
 # Phase 2 wrote a clock jump as a stop and start pair with these reasons (`StopReason.SUSPENDED`, `StartReason.RESUMED` in the collector); replay reads them as an inferred suspend and resume.
 _LEGACY_SUSPENDED = "suspended"
 _LEGACY_RESUMED = "resumed"
@@ -193,13 +195,14 @@ DELIBERATE_REASONS = frozenset({"stop_file", "signal", "console_close", "max_tic
 
 @dataclass(frozen=True, slots=True)
 class _Boundary:
-    """One state change, at the time replay places it: the event's own time, or for a transition matched to an `eventlog` record, the record's."""
+    """One state change, at the time replay places it: the event's own time, or for a transition matched to an `eventlog` record, the record's. `tick` is true for a boundary from a clock jump, which sits on a collector tick: the last tick before the jump for the sleep, the first tick after it for the wake."""
 
     ts: datetime
     id: str
     step: _Step
     source: Source
     confidence: Confidence
+    tick: bool = False
 
 
 @dataclass(slots=True)
@@ -289,8 +292,17 @@ def _deduplicated(events: Iterable[Event]) -> list[Event]:
     return kept
 
 
-def _boundary(event: Event, step: _Step, confidence: Confidence | None = None) -> _Boundary:
-    return _Boundary(event.ts, event.id, step, event.source, confidence or event.confidence)
+def _boundary(
+    event: Event, step: _Step, confidence: Confidence | None = None, *, tick: bool = False
+) -> _Boundary:
+    return _Boundary(
+        event.ts,
+        event.id,
+        step,
+        event.source,
+        confidence or event.confidence,
+        tick or event.source is Source.CLOCK,
+    )
 
 
 def _paired(events: Sequence[Event], kinds: set[EventType]) -> list[_Boundary]:
@@ -404,9 +416,9 @@ def _boundaries(events: Sequence[Event], micro_max: timedelta) -> list[_Boundary
             continue
         reason = event.data.get("reason")
         if event.event is EventType.COLLECTOR_STOP and reason == _LEGACY_SUSPENDED:
-            boundaries.append(_boundary(event, _Step.SUSPEND, Confidence.INFERRED))
+            boundaries.append(_boundary(event, _Step.SUSPEND, Confidence.INFERRED, tick=True))
         elif event.event is EventType.COLLECTOR_START and reason == _LEGACY_RESUMED:
-            boundaries.append(_boundary(event, _Step.START, Confidence.INFERRED))
+            boundaries.append(_boundary(event, _Step.START, Confidence.INFERRED, tick=True))
         else:
             boundaries.append(_boundary(event, _STEP_OF[event.event]))
     return sorted(boundaries, key=lambda boundary: (boundary.ts, boundary.id))
@@ -420,8 +432,17 @@ def _inferred_edge(boundary: _Boundary | None) -> bool:
     return boundary is not None and boundary.confidence is Confidence.INFERRED
 
 
+def _inferred_open(boundary: _Boundary) -> bool:
+    return _inferred_edge(boundary) and not (boundary.tick and boundary.step in _WAKE_STEPS)
+
+
 def _inferred_close(boundary: _Boundary | None) -> bool:
-    return _inferred_edge(boundary) and boundary is not None and boundary.step not in _STOP_STEPS
+    return (
+        _inferred_edge(boundary)
+        and boundary is not None
+        and boundary.step not in _STOP_STEPS
+        and not (boundary.tick and boundary.step is _Step.SUSPEND)
+    )
 
 
 def _intervals(host: str, events: Sequence[Event], micro_max: timedelta) -> list[Interval]:
@@ -445,7 +466,7 @@ def _intervals(host: str, events: Sequence[Event], micro_max: timedelta) -> list
         end = None if closed is None else closed.ts
         if end == opened.ts:
             continue
-        inferred = reconstructed or _inferred_edge(opened) or _inferred_close(closed)
+        inferred = reconstructed or _inferred_open(opened) or _inferred_close(closed)
         confidence = Confidence.INFERRED if inferred else Confidence.OBSERVED
         previous = intervals[-1] if intervals else None
         if previous is not None and previous.kind is kind and previous.confidence is confidence:
@@ -487,6 +508,8 @@ def replay(events: Iterable[Event], *, micro_max: timedelta = timedelta()) -> Ti
     """Derive the typed timeline (roadmap section 6) and the collector's runs. Input order is not trusted: events are sorted by `(ts, id)` first.
 
     Typed intervals: present means awake, unlocked and evidenced. `unlock`, and `input` while awake on an unlocked session, open presence; `lock`, `suspend` and a `collector_stop` close it. Collector liveness with no session event is `unevidenced`, never `present`. Live and inferred session and machine transitions take their `eventlog` partner's time, never across a `collector_stop`; repeated `eventlog` records count once. A phase 2 `suspended` stop with its `resumed` start reads as an inferred suspend and resume.
+
+    A clock jump's boundaries sit on collector ticks, the last before the jump and the first after it, so they are observed on the awake side and inferred on the sleeping side: the interval a clock suspend closes and the one a clock resume opens keep the confidence their other edge gives them, and the asleep interval between them is `inferred`. A phase 2 `suspended` and `resumed` pair is read the same way. An `eventlog` partner still moves the boundary to the logged time.
 
     Gaps between runs (roadmap section 8): a gap after a deliberate stop is `downtime`, and an `unlock` inside it opens presence only from the next start. A gap a coverage note says both logs cover is reconstructed: the state before it carries through, the records inside it apply, a shutdown record makes it `off` and a start record `away` until an unlock, and every interval inside is `inferred`. Its only `downtime` is before a start record no shutdown record precedes, from the last record before that start. An uncovered gap holding the collector's `boot_time()` line is `off` up to it and `away` from it until an unlock, `inferred`. Any other uncovered gap shorter than `micro_max` is folded: the state carries through, `inferred`. Anything else is `downtime`. `micro_max` is `absence.micro_max`; the default folds nothing.
 

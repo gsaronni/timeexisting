@@ -28,6 +28,28 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-19, phase 3 step 6c: clock jump confidence in replay
+
+*Asked:* carried over from 6b, on =phase-3/step-6c-clock-confidence=: apply decision 6's rule to the boundaries of a clock jump. Report and proposal first, approved as proposed.
+
+*Done:*
+- Report: on a clock jump the collector holds a pending gap from the last tick before the jump to the first tick after it (=reconcile.PendingGap=). When no System record resolves it, =_write_clock= writes the =suspend= at the last tick and the =resume= at the first tick after, both =clock=, =inferred=. Phase 2 wrote its =suspended= stop and =resumed= start at the same two ticks. Replay made the interval a clock =suspend= closed =inferred= and the interval a clock =resume= opened =inferred=: two hours of presence observed through a WTS =unlock= before a 45-minute clock sleep read as =inferred=.
+- =ledger/replay.py=: a boundary from a clock jump (=source= =clock=, or the phase 2 =suspended= and =resumed= pair) carries a =tick= flag. It is observed on its awake side and inferred on its sleeping side: a clock =suspend= closing an interval does not make it =inferred=, a clock =resume= or phase 2 =resumed= start opening an interval does not make it =inferred=, and the =asleep= interval between them stays =inferred=. An =eventlog= partner still moves the boundary to the logged time, unchanged.
+- Roadmap section 6: the stop exception in the confidence sentence extended to the clock pair and the phase 2 pair.
+- Tests in =test_presence_model.py=: a clock-only sleep in the middle of presence (present 08:01 to 10:00 =observed=, asleep 10:00 to 10:45 =inferred=, unevidenced 10:45 to 11:30 =observed=); observed presence on both sides of a short clock sleep stays two intervals; a clock pair later paired with =eventlog= records takes their times; a phase 2 pair in the middle of presence. Updated to the rule: the clock suspend case, the phase 2 26 September case and the legacy sleep case, and in =test_replay.py= the phase 2 shard fixture, whose intervals before the sleep and after it to the unclean stop are now =observed=.
+- 1045 tests, up from 1041; =ruff format --check .= and =ruff check .= clean.
+
+*Decided:*
+1. A boundary from a clock jump is observed on its awake side and inferred on its sleeping side.
+2. The phase 2 =suspended= and =resumed= pair follows the same rule: same tick semantics, and shards are re-read, never edited.
+
+*Observed:*
+- On this laptop a tick proves the collector process ran, not that the machine was out of standby: at step 0 the collector kept ticking inside 506 to 507 windows (6a, D1). The clock-only path applies only where the System log cannot resolve the gap.
+
+*Carried over:*
+- Probe =lock= and =unlock=, out of scope here, with the rule decided: replay takes =collector.tick= and splits off the last tick before a probe boundary as =inferred=. A probe transition is written at the first of the two ticks that disagreed, so the real transition lies in the tick before it.
+- Step 9's =te collect timeline= must pass =cfg.absence.micro_max= to =replay= (from 6b, unchanged).
+
 ** 2026-10-16, phase 3 step 6b: gaps between runs in replay
 
 *Asked:* the replay side of step 6 of =docs/phase-3-prompt.md=, on =phase-3/step-6b-replay=: read the coverage notes, reconstruct covered gaps carrying the prior state through as =inferred=, =off= from boot records, and the downtime rules.

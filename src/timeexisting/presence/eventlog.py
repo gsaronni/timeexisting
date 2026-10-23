@@ -24,6 +24,8 @@ CHAIN_STEP = timedelta(seconds=2)
 HIBERNATE_JUMP = timedelta(seconds=60)
 # How long a Kernel-General 1 wake waits for the Power-Troubleshooter 1 that outranks it. At a hibernate wake the Power-Troubleshooter 1 is written about 4.5 s after the clock change (0.5 to 2.5 s after its own WakeTime at step 0); this leaves room, and the pending gap retries for two minutes anyway (section 8).
 WAKE_REPORT_LAG = timedelta(seconds=30)
+# The terminal 507 reasons that name a user input (section 6): 31 Input Keyboard, 32 Input Mouse, 15 Lid, 1 Power Button. A wake for any of them onto an unlocked session is `input` evidence at the 507's own time.
+INPUT_REASONS = frozenset({31, 32, 15, 1})
 
 _NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
 

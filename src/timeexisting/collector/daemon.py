@@ -10,6 +10,8 @@ Event log reconciliation (roadmap section 8, `collector/reconcile.py`). Every ti
 
 Session state (roadmap section 6). At start the session probe records the current state and writes the `unlock` that opens the run's presence when the session is unlocked. Each tick it is read again and compared with the last known state, which the checkpoint holds; a disagreement that persists for two consecutive ticks writes the missing transition, source `probe`, `inferred`.
 
+Input evidence (roadmap section 6, phase 3 step 7). The `Evidence` tracker hears every transition the run writes, seeded from the end of this host's ledger. The reconciler writes `input` from a 507 wake reason. Last in each tick, and only while the tracker says awake, unlocked and unevidenced, the input probe is read once; an input strictly after the start of that stretch and strictly newer than the last `win32` input becomes `input`, source `win32`, `observed`, at its own time. One such input evidences the stretch, so the probe is not read again until the next resume.
+
 Exit paths that write a clean `collector_stop`: the stop file, the stop event (set by a signal handler), `max_ticks`, and a session end or console close reported from another thread through the `Shutdown` handed to `on_start`. All of them go through that one idempotent `Shutdown`, so the first one wins and the rest do nothing. An unexpected exception writes no stop and leaves the checkpoint in place, so the next start records an inferred `unclean` stop at the last tick rather than a clean one that never happened.
 """
 
@@ -32,12 +34,19 @@ import psutil
 
 from timeexisting import paths
 from timeexisting.collector import lockfile
+from timeexisting.collector.evidence import Evidence
 from timeexisting.collector.reconcile import ReadState, Reconciler, coverage
 from timeexisting.config.models import Config
 from timeexisting.domain.clock import Clock
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source, profile_for
-from timeexisting.presence.backend import ChannelCheck, EventLogReader, SessionProbe, SessionState
+from timeexisting.presence.backend import (
+    ChannelCheck,
+    EventLogReader,
+    InputProbe,
+    SessionProbe,
+    SessionState,
+)
 from timeexisting.presence.eventlog import BootKind
 
 logger = logging.getLogger(__name__)
@@ -270,8 +279,12 @@ def startup_probe(
     host: str,
     profile: str,
     last_event: datetime | None = None,
+    *,
+    heard: Callable[[datetime, EventType, Source], object] | None = None,
 ) -> SessionState | None:
     """Record the session state at collector start (roadmap section 6) and return it. Unlocked, with a logon time on the local day of `ts` in `tz` and later than `last_event`: `unlock` source `logon` at the logon time, `observed`. Unlocked otherwise: `unlock` source `probe` at `ts`, `inferred`. Locked or unknown: nothing is written.
+
+    `heard`, when given, is told of the `unlock` written.
 
     `last_event` is the time of this host's last ledger event before this run started: the previous run's stop, or the stop recovered at its checkpoint as unclean. A logon at or before it belongs to a session an earlier run already covered; an unlock stamped there would sort before that stop, which closes it in replay, so the run would open unevidenced.
     """
@@ -286,9 +299,12 @@ def startup_probe(
         and (last_event is None or logon > last_event)
         and logon.astimezone(tz).date() == ts.astimezone(tz).date()
     ):
-        _append(logon, host, profile, EventType.UNLOCK, Source.LOGON, Confidence.OBSERVED)
+        written, source, confidence = logon, Source.LOGON, Confidence.OBSERVED
     else:
-        _append(ts, host, profile, EventType.UNLOCK, Source.PROBE, Confidence.INFERRED)
+        written, source, confidence = ts, Source.PROBE, Confidence.INFERRED
+    _append(written, host, profile, EventType.UNLOCK, source, confidence)
+    if heard is not None:
+        heard(written, EventType.UNLOCK, source)
     return state
 
 
@@ -381,10 +397,11 @@ def run_collector(
     event_log: EventLogReader | None = None,
     session: SessionProbe | None = None,
     boot_time: Callable[[], datetime | None] | None = None,
+    input_probe: InputProbe | None = None,
 ) -> StopReason:
     """Acquire the lock, recover, write `collector_start`, then tick every `cfg.collector.tick` until the stop file appears, `stop_event` is set, `max_ticks` ticks have run, or another thread calls the `Shutdown`. Returns the stop reason.
 
-    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`, then the coverage note for a gap since a stop that was not deliberate, then the first read; it is read again every tick (`reconcile.Reconciler`). Without it a clock jump is written from the clock at once. `boot_time`, when given, is asked once, only for a gap the logs do not fully cover. `session`, when given, gets the startup probe (`startup_probe`) after that and is read again every tick (`ProbeReconciler`). `on_start` receives the `Shutdown` and the `Inbox` once all of that is on disk; the Windows session watcher hooks in there. Each tick drains the inbox into the ledger, then reads the event logs, then probes. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
+    `event_log`, when given, gets the startup self-check (`startup_check`) right after `collector_start`, then the coverage note for a gap since a stop that was not deliberate, then the first read; it is read again every tick (`reconcile.Reconciler`). Without it a clock jump is written from the clock at once. `boot_time`, when given, is asked once, only for a gap the logs do not fully cover. `session`, when given, gets the startup probe (`startup_probe`) after that and is read again every tick (`ProbeReconciler`). `input_probe`, when given, is read at the end of a tick only while the run's `Evidence` says awake, unlocked and unevidenced. `on_start` receives the `Shutdown` and the `Inbox` once all of that is on disk; the Windows session watcher hooks in there. Each tick drains the inbox into the ledger, then reads the event logs, then probes. Raises `lockfile.AlreadyRunning` or `lockfile.LockError` before writing anything if the lock cannot be taken.
     """
     stop_event = stop_event or threading.Event()
     host = paths.current_host()
@@ -410,6 +427,7 @@ def run_collector(
             session,
             leftover,
             boot_time,
+            input_probe,
         )
         shutdown(reason)
         return shutdown.reason or reason
@@ -439,8 +457,9 @@ def _backfill_gap(
     boot_time: Callable[[], datetime | None] | None,
     host: str,
     profile: str,
+    evidence: Evidence,
 ) -> None:
-    """The coverage note for the gap from `stop` to `start` (roadmap section 8), and a `boot` from `boot_time()` when the machine started inside a gap the logs do not fully cover. The gap's records come in with the first read, since the cursors start at the stop."""
+    """The coverage note for the gap from `stop` to `start` (roadmap section 8), and a `boot` from `boot_time()` when the machine started inside a gap the logs do not fully cover. The gap's records come in with the first read, since the cursors start at the stop. `evidence` hears the `boot`, which resets the session for a 507 after it."""
     covered = coverage(event_log, channels, stop.ts, start)
     _append(start, host, profile, EventType.NOTE, Source.COLLECTOR, Confidence.OBSERVED, covered.data())
     logger.info("gap since %s: %s", stop.ts.isoformat(), dict(covered.data()))
@@ -462,6 +481,7 @@ def _backfill_gap(
             Confidence.OBSERVED,
             {"detail": "boot_time", "boot_kind": str(BootKind.START)},
         )
+        evidence.heard(booted, EventType.BOOT, Source.COLLECTOR, str(BootKind.START))
 
 
 def _loop(
@@ -478,6 +498,7 @@ def _loop(
     session: SessionProbe | None,
     leftover: ReadState | None,
     boot_time: Callable[[], datetime | None] | None,
+    input_probe: InputProbe | None,
 ) -> StopReason:
     tick = cfg.collector.tick
     inbox = shutdown.inbox
@@ -505,12 +526,13 @@ def _loop(
     ) -> None:
         _append(ts, host, profile, event, source, confidence, data)
 
-    reconciler = Reconciler(
-        event_log, channels, reads, previous if gap is None else gap.ts, host, ledger, append
-    )
+    read_from = previous if gap is None else gap.ts
+    # Bounded from the end of the ledger: what the System cursor can still return, and the last machine boundary.
+    evidence = Evidence.seed(own, reads.system_cursor or read_from)
+    reconciler = Reconciler(event_log, channels, reads, read_from, host, ledger, append, evidence)
     shutdown.flush = reconciler.flush
     if event_log is not None and gap is not None:
-        _backfill_gap(gap, previous, event_log, channels, boot_time, host, profile)
+        _backfill_gap(gap, previous, event_log, channels, boot_time, host, profile, evidence)
     reconciler.tick(previous)
     probe = ProbeReconciler(None)
     if session is not None:
@@ -521,7 +543,9 @@ def _loop(
             host,
             profile,
             None if last is None else last.ts,
+            heard=evidence.heard,
         )
+    evidence.started(previous, probe.known)
     write_checkpoint(host, previous, probe.known, reconciler.state)
     if on_start is not None:
         on_start(shutdown, inbox)
@@ -552,6 +576,7 @@ def _loop(
                 reconciler.jump(previous, now)
             for transition in inbox.drain():
                 _record(transition, host, profile)
+                evidence.heard(transition.ts, transition.event, transition.source)
                 state = _SESSION_STATE_OF.get(transition.event)
                 if state is not None:
                     probe.heard(state)
@@ -562,8 +587,26 @@ def _loop(
                     state, seen = missing
                     logger.info("probe: session %s since %s with no notification", state, seen.isoformat())
                     _append(seen, host, profile, _SESSION_EVENT_OF[state], Source.PROBE, Confidence.INFERRED)
+                    evidence.heard(seen, _SESSION_EVENT_OF[state], Source.PROBE)
+            if input_probe is not None:
+                _read_input(input_probe, evidence, now, host, profile)
             write_checkpoint(host, now, probe.known, reconciler.state)
             previous = now
+
+
+def _read_input(input_probe: InputProbe, evidence: Evidence, now: datetime, host: str, profile: str) -> None:
+    """The `GetLastInputInfo` fallback (roadmap section 6): one read, only while awake, unlocked and unevidenced. An input at or before the start of that stretch, the resume it follows, or not newer than the last `win32` input written, is not evidence of this stretch and writes nothing."""
+    since = evidence.unevidenced_since
+    if since is None:
+        return
+    seen = input_probe.last_input(now)
+    if seen is None or seen <= since:
+        return
+    if evidence.last_win32 is not None and seen <= evidence.last_win32:
+        return
+    logger.info("input at %s after the stretch unevidenced since %s", seen.isoformat(), since.isoformat())
+    _append(seen, host, profile, EventType.INPUT, Source.WIN32, Confidence.OBSERVED)
+    evidence.heard(seen, EventType.INPUT, Source.WIN32)
 
 
 def system_boot_time() -> datetime | None:

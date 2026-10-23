@@ -348,6 +348,7 @@ def _collect_run(cfg: Config) -> None:
                 on_start=_session_watch(),
                 event_log=backend.event_log(),
                 session=backend.session_probe(),
+                input_probe=backend.input_probe(),
                 boot_time=daemon.system_boot_time,
             )
     except (lockfile.AlreadyRunning, lockfile.LockError) as error:

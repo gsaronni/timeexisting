@@ -9,10 +9,12 @@ import pytest
 
 from timeexisting import paths
 from timeexisting.collector import daemon, lockfile
+from timeexisting.collector.evidence import Evidence
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source, profile_for
 from timeexisting.ledger.replay import IntervalType, replay
-from timeexisting.presence.backend import ChannelCheck, SessionState
+from timeexisting.presence.backend import ChannelCheck, SessionState, Win32Input, input_time
+from timeexisting.presence.eventlog import BootKind, Boundary, SessionRecord
 
 _T0 = datetime(2026, 9, 17, 6, 0, 0, tzinfo=UTC)
 
@@ -934,3 +936,397 @@ def test_an_unreadable_boot_time_is_logged_and_none(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=daemon.__name__):
         assert daemon.system_boot_time() is None
     assert "boot time unreadable" in caplog.text
+
+
+# Step 7: `GetLastInputInfo`, read once per tick and only while awake, unlocked and unevidenced.
+
+
+class _FakeInput:
+    """An input probe that records the time of every read and answers `answer(now)`."""
+
+    def __init__(self, answer) -> None:
+        self.answer = answer
+        self.reads: list[datetime] = []
+
+    def last_input(self, now: datetime) -> datetime | None:
+        self.reads.append(now)
+        return self.answer(now)
+
+
+def _input_lines() -> list[tuple[str, datetime, str, dict]]:
+    return [
+        (str(e.source), e.ts, str(e.confidence), dict(e.data))
+        for e in _ledger()
+        if e.event is EventType.INPUT
+    ]
+
+
+def _scripted(clock: _ManualClock, puts: dict[int, list[tuple[EventType, Source]]]):
+    """A `sleep` that puts transitions into the inbox at the end of the given sleeps, so tick n drains them stamped at its own time, and the `on_start` that hands it the inbox."""
+    inboxes: list[daemon.Inbox] = []
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        for event, source in puts.get(clock.sleeps, []):
+            inboxes[0].put(event, source)
+
+    return sleep, lambda _shutdown, inbox: inboxes.append(inbox)
+
+
+def _run_scripted(cfg, puts, input_probe, readings=(_UNLOCKED,), ticks: int = 8) -> None:
+    clock = _ManualClock(_T0)
+    sleep, on_start = _scripted(clock, puts)
+    daemon.run_collector(
+        clock,
+        sleep,
+        cfg,
+        max_ticks=ticks,
+        on_start=on_start,
+        session=_FakeSession(list(readings)),
+        input_probe=input_probe,
+    )
+
+
+_SLEEP_AND_WAKE = {2: [(EventType.SUSPEND, Source.POWER)], 4: [(EventType.RESUME, Source.POWER)]}
+
+
+def test_input_after_a_resume_onto_an_unlocked_session_is_read_and_written_once(cfg):
+    probe = _FakeInput(lambda now: now - timedelta(seconds=5))
+    _run_scripted(cfg, _SLEEP_AND_WAKE, probe)
+
+    # Tick 4 drains the resume: the input 5 s before it is from before the wake. Tick 5 finds input after it and evidences the stretch, so the probe is not read again.
+    assert probe.reads == [_tick(cfg, 4), _tick(cfg, 5)]
+    assert _input_lines() == [("win32", _tick(cfg, 5) - timedelta(seconds=5), "observed", {})]
+
+
+def test_a_run_with_evidence_from_its_start_never_reads_input(cfg):
+    probe = _FakeInput(lambda now: now)
+    _run_scripted(cfg, {}, probe)
+    assert probe.reads == []
+
+
+def test_no_read_while_asleep(cfg):
+    probe = _FakeInput(lambda now: now)
+    _run_scripted(cfg, {2: [(EventType.SUSPEND, Source.POWER)]}, probe)
+    assert probe.reads == []
+    assert _input_lines() == []
+
+
+def test_no_read_on_a_locked_session(cfg):
+    probe = _FakeInput(lambda now: now)
+    puts = {1: [(EventType.LOCK, Source.WTS)], **_SLEEP_AND_WAKE}
+    _run_scripted(cfg, puts, probe, readings=(_UNLOCKED, _LOCKED))
+    assert probe.reads == []
+
+
+def test_no_read_when_an_unlock_already_evidenced_the_tick(cfg):
+    probe = _FakeInput(lambda now: now)
+    puts = {
+        2: [(EventType.SUSPEND, Source.POWER)],
+        4: [(EventType.RESUME, Source.POWER), (EventType.UNLOCK, Source.WTS)],
+    }
+    _run_scripted(cfg, puts, probe)
+    assert probe.reads == []
+
+
+def test_two_ticks_with_the_same_last_input_write_one_record(cfg):
+    seen = _tick(cfg, 4) + timedelta(seconds=10)
+    probe = _FakeInput(lambda now: seen if now >= seen else None)
+    _run_scripted(cfg, _SLEEP_AND_WAKE, probe)
+    assert _input_lines() == [("win32", seen, "observed", {})]
+    assert probe.reads == [_tick(cfg, 4), _tick(cfg, 5)]
+
+
+def test_the_wrapped_tick_count_gives_the_small_elapsed_through_the_collector(cfg):
+    probe = Win32Input(lambda: (0xFFFFFF00, 0x100))
+    _run_scripted(cfg, _SLEEP_AND_WAKE, probe)
+    assert _input_lines() == [("win32", _tick(cfg, 5) - timedelta(milliseconds=512), "observed", {})]
+
+
+def test_an_input_not_strictly_after_the_resume_or_the_last_win32_input_writes_nothing():
+    resume = _T0 + timedelta(minutes=10)
+    tracker = Evidence()
+    tracker.started(_T0, _UNLOCKED)
+    tracker.heard(_T0 + timedelta(minutes=1), EventType.SUSPEND, Source.EVENTLOG)
+    tracker.heard(resume, EventType.RESUME, Source.EVENTLOG)
+    now = resume + timedelta(minutes=1)
+
+    daemon._read_input(_FakeInput(lambda _now: resume), tracker, now, _host(), "work")
+    assert _input_lines() == []
+
+    tracker.last_win32 = resume + timedelta(seconds=30)
+    daemon._read_input(_FakeInput(lambda _now: resume + timedelta(seconds=30)), tracker, now, _host(), "work")
+    assert _input_lines() == []
+
+    later = resume + timedelta(seconds=31)
+    daemon._read_input(_FakeInput(lambda _now: later), tracker, now, _host(), "work")
+    assert _input_lines() == [("win32", later, "observed", {})]
+    assert not tracker.wants_input()
+
+
+def test_an_unreadable_input_writes_nothing_and_keeps_reading(cfg):
+    probe = _FakeInput(lambda _now: None)
+    _run_scripted(cfg, _SLEEP_AND_WAKE, probe)
+    assert _input_lines() == []
+    assert probe.reads == [_tick(cfg, n) for n in range(4, 9)]
+
+
+# Frozen-tick behaviour (step 7 review). Whether the tick count behind `GetLastInputInfo` stops during sleep is a step 10 live check, not a correctness gate: these pin that the strict floor gives the same answer either way. A count frozen during sleep understates the idle time by the sleep's length, so an input from before the 506 is placed later than it was, but never as late as the 507, and the floor rejects it.
+
+_MS = timedelta(milliseconds=1)
+_TICK_MASK = 0xFFFFFFFF
+_SLEEPS_AT, _WAKES_AT, _LAST_TICK = 2, 20, 24
+_LONG_SLEEP = {
+    _SLEEPS_AT: [(EventType.SUSPEND, Source.POWER)],
+    _WAKES_AT: [(EventType.RESUME, Source.POWER)],
+}
+
+
+class _TickModel:
+    """`LASTINPUTINFO.dwTime` and `GetTickCount()` for a manual clock: 32-bit millisecond counts, `base` at `_T0`, that stop from `asleep` to `awake` when `frozen`. `inputs` are the wall-clock times of user input; `dwTime` is the count at the last one at or before the read."""
+
+    def __init__(self, clock, asleep, awake, inputs, frozen, base=0) -> None:
+        self.clock = clock
+        self.asleep = asleep
+        self.awake = awake
+        self.inputs = inputs
+        self.frozen = frozen
+        self.base = base
+        self.reads: list[datetime] = []
+
+    def count(self, t: datetime) -> int:
+        elapsed = t - _T0
+        if self.frozen:
+            elapsed -= max(timedelta(), min(t, self.awake) - self.asleep)
+        return (self.base + elapsed // _MS) & _TICK_MASK
+
+    def read(self) -> tuple[int, int]:
+        now = self.clock.current
+        self.reads.append(now)
+        last = max(t for t in self.inputs if t <= now)
+        return (self.count(last), self.count(now))
+
+
+def _run_with_ticks(cfg, inputs, frozen, *, wake_count=None) -> _TickModel:
+    """Sleep at tick 2, wake at tick 20, on an unlocked session, with `Win32Input` over a `_TickModel`. `wake_count`, when given, sets `base` so the count at the wake is that value."""
+    clock = _ManualClock(_T0)
+    sleep, on_start = _scripted(clock, _LONG_SLEEP)
+    model = _TickModel(clock, _tick(cfg, _SLEEPS_AT), _tick(cfg, _WAKES_AT), inputs, frozen)
+    if wake_count is not None:
+        model.base = (wake_count - model.count(model.awake)) & _TICK_MASK
+    daemon.run_collector(
+        clock,
+        sleep,
+        cfg,
+        max_ticks=_LAST_TICK,
+        on_start=on_start,
+        session=_FakeSession([_UNLOCKED]),
+        input_probe=Win32Input(model.read),
+    )
+    return model
+
+
+def test_frozen_ticks_an_input_just_before_the_506_is_placed_before_the_wake_and_not_written(cfg):
+    suspend, resume = _tick(cfg, _SLEEPS_AT), _tick(cfg, _WAKES_AT)
+    model = _run_with_ticks(cfg, [suspend - timedelta(seconds=1)], frozen=True)
+
+    # Read on every tick of the stretch, rejected every time: the frozen count places the input at the 507 minus the 1 s before the 506.
+    assert model.reads == [_tick(cfg, n) for n in range(_WAKES_AT, _LAST_TICK + 1)]
+    last, ticks = model.read()
+    assert input_time(model.clock.current, last, ticks) == resume - timedelta(seconds=1)
+    assert _input_lines() == []
+
+
+def test_advancing_ticks_an_input_just_before_the_506_is_not_written(cfg):
+    suspend = _tick(cfg, _SLEEPS_AT)
+    model = _run_with_ticks(cfg, [suspend - timedelta(seconds=1)], frozen=False)
+
+    assert model.reads == [_tick(cfg, n) for n in range(_WAKES_AT, _LAST_TICK + 1)]
+    last, ticks = model.read()
+    assert input_time(model.clock.current, last, ticks) == suspend - timedelta(seconds=1)
+    assert _input_lines() == []
+
+
+@pytest.mark.parametrize("frozen", [True, False], ids=["frozen-ticks", "advancing-ticks"])
+def test_an_input_40_s_after_the_wake_is_written_once_at_its_time_either_way(cfg, frozen):
+    suspend, resume = _tick(cfg, _SLEEPS_AT), _tick(cfg, _WAKES_AT)
+    inputs = [suspend - timedelta(seconds=1), resume + timedelta(seconds=40)]
+    model = _run_with_ticks(cfg, inputs, frozen=frozen)
+
+    # Ticks 20 and 21 still see the input from before the sleep; tick 22, 60 s after the wake, sees the new one and evidences the stretch.
+    assert model.reads == [_tick(cfg, 20), _tick(cfg, 21), _tick(cfg, 22)]
+    assert _input_lines() == [("win32", resume + timedelta(seconds=40), "observed", {})]
+
+
+@pytest.mark.parametrize("frozen", [True, False], ids=["frozen-ticks", "advancing-ticks"])
+def test_a_count_that_wraps_between_the_wake_and_the_input_is_accepted(cfg, frozen):
+    suspend, resume = _tick(cfg, _SLEEPS_AT), _tick(cfg, _WAKES_AT)
+    inputs = [suspend - timedelta(seconds=1), resume + timedelta(seconds=40)]
+    model = _run_with_ticks(cfg, inputs, frozen=frozen, wake_count=_TICK_MASK - 9_999)
+
+    assert model.count(resume) == 0xFFFFD8F0
+    assert model.count(resume + timedelta(seconds=40)) == 30_000
+    assert _input_lines() == [("win32", resume + timedelta(seconds=40), "observed", {})]
+
+
+# A 507 backfilled into a gap between runs (step 7 review). `_backfill_gap` writes only the coverage `note` and a `boot_time` `boot`, which the tracker does not follow. The gap's suspend, resume, lock and unlock come in with the first `Reconciler.tick`, which reads both channels through the tracker before it judges a 507, so a Winlogon lock in the gap is heard first.
+
+
+class _GapLog:
+    """An event log reader over fixed records: both channels readable and reaching back to `oldest`."""
+
+    def __init__(self, boundaries: list[Boundary], records: list[SessionRecord], oldest: datetime) -> None:
+        self.boundaries = boundaries
+        self.records = records
+        self.first = oldest
+
+    def check(self) -> ChannelCheck:
+        return ChannelCheck(system=True, winlogon=True)
+
+    def system_boundaries(self, since: datetime, until: datetime) -> list[Boundary]:
+        return [b for b in self.boundaries if since <= b.time <= until]
+
+    def session_records(self, since: datetime) -> list[SessionRecord]:
+        return [r for r in self.records if r.time >= since]
+
+    def oldest(self, _channel: str) -> datetime | None:
+        return self.first
+
+
+def _put_previous_run(event: EventType, ts: datetime, source: Source, **data: str) -> None:
+    store.append(
+        Event.new(
+            ts=ts,
+            host=_host(),
+            profile="work",
+            event=event,
+            source=source,
+            confidence=Confidence.INFERRED if data.get("reason") == "unclean" else Confidence.OBSERVED,
+            data=data,
+        )
+    )
+
+
+@pytest.mark.parametrize("locked", [True, False], ids=["lock-before-the-507", "no-lock"])
+def test_a_winlogon_lock_in_a_gap_before_a_507_for_a_mouse_wake_writes_no_input(cfg, locked):
+    stop = _T0 - timedelta(hours=1)
+    unlocked = stop - timedelta(minutes=50)
+    standby, lock, wake = (
+        stop + timedelta(minutes=5),
+        stop + timedelta(minutes=8),
+        stop + timedelta(minutes=40),
+    )
+    _put_previous_run(EventType.COLLECTOR_START, stop - timedelta(hours=1), Source.COLLECTOR, reason="launch")
+    _put_previous_run(EventType.UNLOCK, unlocked, Source.EVENTLOG, detail="Winlogon/Operational 811 Sens 5")
+    _put_previous_run(EventType.COLLECTOR_STOP, stop, Source.COLLECTOR, reason="unclean")
+    boundaries = [
+        Boundary(standby, EventType.SUSPEND, "System Kernel-Power 506 reason 12"),
+        Boundary(wake, EventType.RESUME, "System Kernel-Power 507 reason 32", reason=32),
+    ]
+    records = [SessionRecord(unlocked, EventType.UNLOCK, 5)]
+    if locked:
+        records.append(SessionRecord(lock, EventType.LOCK, 4))
+    _run(
+        cfg, _ManualClock(_T0), max_ticks=3, event_log=_GapLog(boundaries, records, stop - timedelta(days=7))
+    )
+
+    backfilled = [(str(e.event), e.ts) for e in _ledger() if e.ts > stop and e.event is not EventType.NOTE]
+    assert ("resume", wake) in backfilled
+    if locked:
+        assert ("lock", lock) in backfilled
+        assert _input_lines() == []
+    else:
+        # The same gap without the lock writes the input, so the 507 did reach the input rule.
+        assert _input_lines() == [
+            ("eventlog", wake, "observed", {"detail": "System Kernel-Power 507 reason 32"})
+        ]
+
+
+# A reboot in a gap (step 7 review). A boot start sets the session locked, a boot without a kind sets it unknown, so a 507 after a reboot with no unlock since is not on an unlocked session. Each test has a control with an unlock after the boot.
+
+
+def _gap_before_this_run() -> tuple[datetime, datetime]:
+    """A previous run that ends unlocked with an unclean stop an hour before `_T0`. Returns the stop and the unlock."""
+    stop = _T0 - timedelta(hours=1)
+    unlocked = stop - timedelta(minutes=50)
+    _put_previous_run(EventType.COLLECTOR_START, stop - timedelta(hours=1), Source.COLLECTOR, reason="launch")
+    _put_previous_run(EventType.UNLOCK, unlocked, Source.EVENTLOG, detail="Winlogon/Operational 811 Sens 5")
+    _put_previous_run(EventType.COLLECTOR_STOP, stop, Source.COLLECTOR, reason="unclean")
+    return stop, unlocked
+
+
+_MOUSE_WAKE = "System Kernel-Power 507 reason 32"
+
+
+@pytest.mark.parametrize(
+    "unlocked_after", [False, True], ids=["no-unlock-after-the-boot", "unlock-after-the-boot"]
+)
+def test_a_507_after_a_reboot_in_a_gap_writes_no_input_until_an_unlock(cfg, unlocked_after):
+    stop, unlocked = _gap_before_this_run()
+    shutdown, started = stop + timedelta(minutes=3), stop + timedelta(minutes=5)
+    unlock = stop + timedelta(minutes=7)
+    standby, wake = stop + timedelta(minutes=20), stop + timedelta(minutes=40)
+    boundaries = [
+        Boundary(shutdown, EventType.BOOT, "System Kernel-General 13", boot_kind=BootKind.STOP),
+        Boundary(started, EventType.BOOT, "System Kernel-General 12", boot_kind=BootKind.START),
+        Boundary(standby, EventType.SUSPEND, "System Kernel-Power 506 reason 12"),
+        Boundary(wake, EventType.RESUME, _MOUSE_WAKE, reason=32),
+    ]
+    records = [SessionRecord(unlocked, EventType.UNLOCK, 5)]
+    if unlocked_after:
+        records.append(SessionRecord(unlock, EventType.UNLOCK, 5))
+    _run(
+        cfg, _ManualClock(_T0), max_ticks=3, event_log=_GapLog(boundaries, records, stop - timedelta(days=7))
+    )
+
+    backfilled = [(str(e.event), e.ts) for e in _ledger() if e.ts > stop and e.event is not EventType.NOTE]
+    assert ("boot", started) in backfilled and ("resume", wake) in backfilled
+    if unlocked_after:
+        assert _input_lines() == [("eventlog", wake, "observed", {"detail": _MOUSE_WAKE})]
+    else:
+        assert _input_lines() == []
+
+
+@pytest.mark.parametrize("booted", [True, False], ids=["boot-time-in-the-gap", "no-boot-time"])
+def test_the_boot_time_boot_of_an_uncovered_gap_resets_the_session_for_a_507_after_it(cfg, booted):
+    """Winlogon/Operational does not reach back, so the gap is not covered and `boot_time()` is asked. Its `boot` is heard by the tracker: a 507 after it, with no unlock since, writes no input. Without it, the session carries from before the stop."""
+    stop, unlocked = _gap_before_this_run()
+    boot = stop + timedelta(minutes=5)
+    standby, wake = stop + timedelta(minutes=20), stop + timedelta(minutes=40)
+    boundaries = [
+        Boundary(standby, EventType.SUSPEND, "System Kernel-Power 506 reason 12"),
+        Boundary(wake, EventType.RESUME, _MOUSE_WAKE, reason=32),
+    ]
+    records = [SessionRecord(unlocked, EventType.UNLOCK, 5)]
+    event_log = _GapLog(boundaries, records, stop + timedelta(minutes=1))
+    _run(cfg, _ManualClock(_T0), max_ticks=3, event_log=event_log, boot_time=lambda: boot if booted else None)
+
+    boots = [(e.ts, e.data.get("detail")) for e in _ledger() if e.event is EventType.BOOT]
+    assert boots == ([(boot, "boot_time")] if booted else [])
+    if booted:
+        assert _input_lines() == []
+    else:
+        assert _input_lines() == [("eventlog", wake, "observed", {"detail": _MOUSE_WAKE})]
+
+
+@pytest.mark.parametrize("kind", [BootKind.START, None], ids=["boot-start", "kindless-boot"])
+@pytest.mark.parametrize("unlocked_after", [False, True], ids=["no-unlock", "unlock-after-the-boot"])
+def test_the_win32_probe_is_not_read_between_a_boot_and_the_first_unlock(kind, unlocked_after):
+    boot, resume = _T0 + timedelta(minutes=5), _T0 + timedelta(minutes=30)
+    tracker = Evidence()
+    tracker.started(_T0, _UNLOCKED)
+    tracker.heard(boot, EventType.BOOT, Source.EVENTLOG, None if kind is None else str(kind))
+    if unlocked_after:
+        tracker.heard(boot + timedelta(minutes=2), EventType.UNLOCK, Source.EVENTLOG)
+    tracker.heard(resume - timedelta(minutes=10), EventType.SUSPEND, Source.EVENTLOG)
+    tracker.heard(resume, EventType.RESUME, Source.EVENTLOG)
+    probe = _FakeInput(lambda now: now - timedelta(seconds=5))
+    now = resume + timedelta(minutes=1)
+    daemon._read_input(probe, tracker, now, _host(), "work")
+
+    if unlocked_after:
+        assert probe.reads == [now]
+        assert _input_lines() == [("win32", now - timedelta(seconds=5), "observed", {})]
+    else:
+        assert probe.reads == []
+        assert _input_lines() == []

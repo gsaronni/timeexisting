@@ -4,7 +4,7 @@ It mirrors replay's rules for the facts it needs. `lock` and `suspend` clear evi
 
 A `collector_stop` is looked through: the session at a time inside a gap is the last lock, unlock or boot before it. For a gap the logs do not cover, replay resets the session to unknown and drops an input written there, so this can lose evidence but never invent it.
 
-Transitions are folded in time order, not arrival order, so a record backfilled from the event logs with a past time slots into place. At the same time, earlier arrivals come first.
+Transitions are folded in time order, not arrival order, so a record backfilled from the event logs with a past time slots into place. At one time, `events.tie_rank` orders them as replay does (an `input` after a `resume`, a `lock` after an `unlock` or `input`), and earlier arrivals come first among equals.
 
 Pure: no clock, no I/O.
 """
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 
-from timeexisting.ledger.events import Event, EventType, Source
+from timeexisting.ledger.events import Event, EventType, Source, order_key, tie_rank
 from timeexisting.presence.backend import SessionState
 from timeexisting.presence.eventlog import BootKind
 
@@ -56,12 +56,8 @@ class _Entry:
     boot: _Boot | None = None
 
 
-def _order(entry: _Entry) -> tuple[datetime, int]:
-    return (entry.ts, entry.seq)
-
-
-def _by_time(event: Event) -> tuple[datetime, str]:
-    return (event.ts, event.id)
+def _order(entry: _Entry) -> tuple[datetime, int, int]:
+    return (entry.ts, tie_rank(entry.event), entry.seq)
 
 
 def _sets_session(event: Event) -> bool:
@@ -79,7 +75,7 @@ def _sets_machine(event: Event) -> bool:
 
 
 class Evidence:
-    """The tracker. `events` are folded in `(ts, id)` order; `seed` picks the bounded slice of a ledger the collector needs."""
+    """The tracker. `events` are folded in `events.order_key` order; `seed` picks the bounded slice of a ledger the collector needs."""
 
     def __init__(self, events: Iterable[Event] = ()) -> None:
         self._entries: list[_Entry] = []
@@ -88,7 +84,7 @@ class Evidence:
         self._stale = True
         # The time of the last `win32` input in the ledger: a later one is written only when strictly newer.
         self.last_win32: datetime | None = None
-        for event in sorted(events, key=_by_time):
+        for event in sorted(events, key=order_key):
             self.heard(event.ts, event.event, event.source, event.data.get("boot_kind"))
 
     @classmethod
@@ -97,7 +93,7 @@ class Evidence:
 
         The bound is the earlier of `anchor` and the last record that fixes the machine (a suspend, a resume, a boot start or stop), and the slice starts at the last record that fixes the session (a lock, an unlock, a boot start or a boot without a kind) at or before it. That one record fixes the session from there on, the last machine record fixes the machine, and every later transition is kept, so `session_at` at or after the bound and the current state match a fold of the whole ledger. The last `win32` input is taken from the whole ledger.
         """
-        tracked = sorted((event for event in events if event.event in _TRACKED), key=_by_time)
+        tracked = sorted((event for event in events if event.event in _TRACKED), key=order_key)
         machine = [event.ts for event in tracked if _sets_machine(event)]
         marks = [mark for mark in (anchor, machine[-1] if machine else None) if mark is not None]
         kept = tracked
@@ -134,9 +130,7 @@ class Evidence:
         self._add(_Entry(ts, self._next(), EventType.COLLECTOR_START, session))
 
     def session_at(self, ts: datetime) -> SessionState | None:
-        """The session at `ts`: from the last lock, unlock, boot or run start with a known session at or before it, or `None` when there is none. A boot start reads as locked, a boot without a kind as `None`, and a boot stop leaves the session as it was. A lock at exactly `ts` wins, so a wake that shares its time with a lock is on a locked session."""
-        if any(entry.event is EventType.LOCK and entry.ts == ts for entry in self._entries):
-            return SessionState.LOCKED
+        """The session at `ts`: from the last lock, unlock, boot or run start with a known session at or before it, or `None` when there is none. A boot start reads as locked, a boot without a kind as `None`, and a boot stop leaves the session as it was. A lock at exactly `ts` wins, so a wake that shares its time with a lock is on a locked session: `_order` puts a lock last among the entries at its time, and every other entry that sets the session ranks before it."""
         state: SessionState | None = None
         for entry in self._entries:
             if entry.ts > ts:

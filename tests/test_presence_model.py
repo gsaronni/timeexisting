@@ -1,13 +1,14 @@
 """The typed timeline of roadmap section 6, from synthetic events only. Times are written in local Copenhagen time for readability and stored in UTC like every event."""
 
+import dataclasses
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from timeexisting.ledger.events import Confidence, Event, EventType, Source
-from timeexisting.ledger.replay import Coverage, Interval, IntervalType, day_view, replay
+from timeexisting.ledger.events import Confidence, Event, EventType, Source, order_key
+from timeexisting.ledger.replay import Coverage, Interval, IntervalType, _boundaries, _Step, day_view, replay
 
 _CPH = ZoneInfo("Europe/Copenhagen")
 _HOST = "laptop"
@@ -999,3 +1000,149 @@ def test_intervals_never_overlap_and_are_stored_in_utc():
     for earlier, later in pairwise(timeline):
         assert earlier.end == later.start
     assert all(interval.start.tzinfo is UTC for interval in timeline)
+
+
+# Same-timestamp order (phase 3 step 7b): `events.order_key` at both sort sites. Ids are forced, so the test sets the id order rather than the clock.
+
+
+def with_id(event: Event, n: int) -> Event:
+    return dataclasses.replace(event, id=f"{n:032x}")
+
+
+_ID_ORDERS = [(1, 2), (2, 1)]
+
+
+@pytest.mark.parametrize(("input_id", "resume_id"), _ID_ORDERS, ids=["input-id-first", "resume-id-first"])
+def test_an_input_at_the_time_of_its_resume_opens_presence_whatever_the_ids_say(input_id, resume_id):
+    wake = _t(13, 12, 3)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        suspend(_t(13, 12, 0)),
+        with_id(resume(wake), resume_id),
+        with_id(user_input(wake, Source.EVENTLOG), input_id),
+    )
+    assert timeline[-2:] == (iv(ASLEEP, _t(13, 12, 0), wake), iv(PRESENT, wake, None))
+
+
+@pytest.mark.parametrize(("input_id", "resume_id"), _ID_ORDERS, ids=["input-id-first", "resume-id-first"])
+def test_an_input_after_its_resume_opens_presence_at_its_own_time_as_before(input_id, resume_id):
+    """The control: at different times the ids never mattered, and still do not."""
+    wake, touched = _t(13, 12, 3), _t(13, 12, 4)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        suspend(_t(13, 12, 0)),
+        with_id(resume(wake), resume_id),
+        with_id(user_input(touched, Source.EVENTLOG), input_id),
+    )
+    assert timeline[-2:] == (iv(UNEVIDENCED, wake, touched), iv(PRESENT, touched, None))
+
+
+@pytest.mark.parametrize(("lock_id", "unlock_id"), _ID_ORDERS, ids=["lock-id-first", "unlock-id-first"])
+def test_a_lock_and_an_unlock_at_one_time_read_locked_from_then_on(lock_id, unlock_id):
+    tie = _t(13, 9, 0)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        with_id(lock(tie), lock_id),
+        with_id(unlock(tie), unlock_id),
+    )
+    assert timeline == (iv(PRESENT, _t(13, 8, 0), tie), iv(AWAY, tie, None))
+
+
+@pytest.mark.parametrize(("input_id", "other_id"), _ID_ORDERS, ids=["input-id-first", "input-id-last"])
+@pytest.mark.parametrize("closer", ["suspend", "stop"])
+def test_an_input_at_the_time_of_a_suspend_or_a_stop_opens_nothing(closer, input_id, other_id):
+    """Cover, not a change: the input sorts after the suspend or stop and is dropped; before it, it would open a zero-length presence the closer ends at once."""
+    at = _t(13, 11, 0)
+    closing = suspend(at) if closer == "suspend" else stop(at, "unclean", INF)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        suspend(_t(13, 9, 0)),
+        resume(_t(13, 10, 0)),
+        with_id(closing, other_id),
+        with_id(user_input(at, Source.EVENTLOG), input_id),
+        resume(_t(13, 12, 0)) if closer == "suspend" else start(_t(13, 12, 0)),
+    )
+    after = ASLEEP if closer == "suspend" else DOWNTIME
+    assert [interval.kind for interval in timeline] == [PRESENT, ASLEEP, UNEVIDENCED, after, UNEVIDENCED]
+    assert timeline[3].start == at
+
+
+@pytest.mark.parametrize("unlock_first", [True, False], ids=["unlock-id-first", "stop-id-first"])
+def test_an_unlock_at_the_time_of_a_stop_stays_in_id_order(unlock_first):
+    """Not ranked: the ties the collector writes keep today's id order (see `events.tie_rank`). An unlock before the stop is closed by it; one after it is inside the gap and opens presence from the next start."""
+    at, restart = _t(13, 10, 0), _t(13, 11, 0)
+    unlock_id, stop_id = (1, 2) if unlock_first else (2, 1)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        lock(_t(13, 8, 0)),
+        with_id(unlock(at), unlock_id),
+        with_id(stop(at, "unclean", INF), stop_id),
+        start(restart),
+    )
+    kind = UNEVIDENCED if unlock_first else PRESENT
+    assert timeline[-1] == iv(kind, restart, None, Source.COLLECTOR)
+
+
+@pytest.mark.parametrize("start_first", [True, False], ids=["start-id-first", "unlock-id-first"])
+def test_the_startup_probes_unlock_at_the_start_stays_in_id_order(start_first):
+    """Not ranked: the collector writes the start before the probe's unlock, and the id order keeps the presence it opens `inferred`, from the probe. The reverse order would open it from the start, observed."""
+    restart = _t(13, 10, 20)
+    start_id, unlock_id = (1, 2) if start_first else (2, 1)
+    timeline = intervals(
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        stop(_t(13, 10, 0), "unclean", INF),
+        with_id(start(restart), start_id),
+        with_id(unlock(restart, Source.PROBE, INF), unlock_id),
+    )
+    expected = (
+        iv(PRESENT, restart, None, Source.PROBE, INF)
+        if start_first
+        else iv(PRESENT, restart, None, Source.COLLECTOR)
+    )
+    assert timeline[-1] == expected
+
+
+def test_the_boundaries_sort_by_rank_before_id():
+    """The second sort site, `_boundaries`: at one time a resume comes before its input and an unlock before a lock, whatever the ids say."""
+    wake, tie = _t(13, 12, 3), _t(13, 13, 0)
+    events = [
+        start(_t(13, 8, 0)),
+        unlock(_t(13, 8, 0)),
+        lock(_t(13, 8, 30)),
+        suspend(_t(13, 12, 0)),
+        with_id(resume(wake), 4),
+        with_id(user_input(wake, Source.EVENTLOG), 3),
+        with_id(lock(tie), 1),
+        with_id(unlock(tie), 2),
+    ]
+    steps = [(b.ts, b.step) for b in _boundaries(sorted(events, key=order_key), timedelta())]
+    assert steps[-4:] == [(wake, _Step.RESUME), (wake, _Step.INPUT), (tie, _Step.UNLOCK), (tie, _Step.LOCK)]
+
+
+@pytest.mark.parametrize(("input_id", "resume_id"), _ID_ORDERS, ids=["input-id-first", "resume-id-first"])
+def test_the_timelines_events_put_a_resume_before_its_input_and_an_unlock_before_a_lock(input_id, resume_id):
+    """The first sort site, `replay()` itself: the events it hands back are in `order_key` order."""
+    wake, tie = _t(13, 12, 3), _t(13, 13, 0)
+    timeline = replay(
+        [
+            start(_t(13, 8, 0)),
+            unlock(_t(13, 8, 0)),
+            suspend(_t(13, 12, 0)),
+            with_id(resume(wake), resume_id),
+            with_id(user_input(wake, Source.EVENTLOG), input_id),
+            with_id(lock(tie), input_id),
+            with_id(unlock(tie), resume_id),
+        ]
+    )
+    kinds = [(event.ts, event.event) for event in timeline.events]
+    assert kinds[-4:] == [
+        (wake, EventType.RESUME),
+        (wake, EventType.INPUT),
+        (tie, EventType.UNLOCK),
+        (tie, EventType.LOCK),
+    ]

@@ -1,5 +1,6 @@
 """The collector's evidence tracker (phase 3 step 7), on synthetic events only."""
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -347,3 +348,87 @@ def test_the_bounded_seed_with_a_boot_answers_like_a_full_read(evening, anchor):
     plain = Evidence.seed(_long_ledger(), anchor)
     plain.heard(_at(21 * 24 * 60 + 8 * 60), EventType.RESUME, Source.EVENTLOG)
     assert plain.unevidenced_since == _at(21 * 24 * 60 + 8 * 60)
+
+
+# Same-timestamp order (phase 3 step 7b): `events.order_key` in the fold and the seed, `tie_rank` then arrival in `_order`.
+
+
+def _with_id(event: Event, n: int) -> Event:
+    return dataclasses.replace(event, id=f"{n:032x}")
+
+
+_ID_ORDERS = [(1, 2), (2, 1)]
+_MOUSE = "System Kernel-Power 507 reason 32"
+
+
+@pytest.mark.parametrize(("input_id", "resume_id"), _ID_ORDERS, ids=["input-id-first", "resume-id-first"])
+@pytest.mark.parametrize("same_time", [True, False], ids=["at-the-resume", "after-it"])
+def test_an_input_at_the_time_of_its_resume_evidences_the_stretch_whatever_the_ids_say(
+    same_time, input_id, resume_id
+):
+    ledger = [
+        _event(0, EventType.UNLOCK),
+        _event(30, EventType.SUSPEND),
+        _with_id(_event(60, EventType.RESUME), resume_id),
+        _with_id(_event(60 if same_time else 61, EventType.INPUT, detail=_MOUSE), input_id),
+    ]
+    for tracker in (Evidence(ledger), Evidence.seed(ledger, _at(60))):
+        assert not tracker.wants_input()
+
+
+def test_an_input_heard_before_the_resume_it_shares_a_time_with_still_counts():
+    tracker = Evidence([_event(0, EventType.UNLOCK), _event(30, EventType.SUSPEND)])
+    tracker.heard(_at(60), EventType.INPUT, Source.EVENTLOG)
+    tracker.heard(_at(60), EventType.RESUME, Source.EVENTLOG)
+    assert not tracker.wants_input()
+    # Control: an input heard before a later resume is from the sleep and counts for nothing.
+    control = Evidence([_event(0, EventType.UNLOCK), _event(30, EventType.SUSPEND)])
+    control.heard(_at(59), EventType.INPUT, Source.EVENTLOG)
+    control.heard(_at(60), EventType.RESUME, Source.EVENTLOG)
+    assert control.unevidenced_since == _at(60)
+
+
+@pytest.mark.parametrize(("lock_id", "unlock_id"), _ID_ORDERS, ids=["lock-id-first", "unlock-id-first"])
+def test_a_lock_and_an_unlock_at_one_time_read_locked_in_the_fold_and_the_seed(lock_id, unlock_id):
+    """Locked from that time on, so the resume after the next sleep wants no input. The control unlocks a minute later and does."""
+    ledger = [
+        _event(0, EventType.UNLOCK),
+        _with_id(_event(25, EventType.LOCK), lock_id),
+        _with_id(_event(25, EventType.UNLOCK), unlock_id),
+        _event(30, EventType.SUSPEND),
+        _event(40, EventType.RESUME),
+    ]
+    for tracker in (Evidence(ledger), Evidence.seed(ledger, _at(30))):
+        assert tracker.session_at(_at(25)) is LOCKED
+        assert tracker.session_at(_at(26)) is LOCKED
+        assert not tracker.wants_input()
+    control = Evidence([*ledger, _event(26, EventType.UNLOCK)])
+    assert control.session_at(_at(26)) is UNLOCKED
+    assert control.unevidenced_since == _at(40)
+
+
+@pytest.mark.parametrize("lock_first", [True, False], ids=["lock-heard-first", "unlock-heard-first"])
+def test_a_lock_and_an_unlock_heard_at_one_time_read_locked_whatever_the_arrival_order(lock_first):
+    tracker = Evidence([_event(0, EventType.UNLOCK)])
+    heard = [(EventType.LOCK, Source.WTS), (EventType.UNLOCK, Source.WTS)]
+    for event, source in heard if lock_first else reversed(heard):
+        tracker.heard(_at(25), event, source)
+    tracker.heard(_at(30), EventType.SUSPEND, Source.EVENTLOG)
+    tracker.heard(_at(40), EventType.RESUME, Source.EVENTLOG)
+    assert tracker.session_at(_at(25)) is LOCKED
+    assert not tracker.wants_input()
+
+
+@pytest.mark.parametrize(("input_id", "suspend_id"), _ID_ORDERS, ids=["input-id-first", "suspend-id-first"])
+def test_an_input_at_the_time_of_a_suspend_evidences_nothing(input_id, suspend_id):
+    """Cover, not a change: the input sorts after the suspend and is dropped; before it, the suspend would clear what it set."""
+    ledger = [
+        _event(0, EventType.UNLOCK),
+        _event(5, EventType.SUSPEND),
+        _event(10, EventType.RESUME),
+        _with_id(_event(30, EventType.SUSPEND), suspend_id),
+        _with_id(_event(30, EventType.INPUT, Source.WIN32), input_id),
+        _event(60, EventType.RESUME),
+    ]
+    for tracker in (Evidence(ledger), Evidence.seed(ledger, _at(30))):
+        assert tracker.unevidenced_since == _at(60)

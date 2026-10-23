@@ -941,3 +941,156 @@ def test_an_uncovered_gap_with_the_boot_time_line_is_off_up_to_the_boot_then_awa
 
 def test_replay_and_the_collector_agree_on_the_deliberate_stops():
     assert {str(reason) for reason in daemon.DELIBERATE_STOPS} == DELIBERATE_REASONS
+
+
+# Input evidence (phase 3 step 7): the 507 wake reason, and `GetLastInputInfo` beside the System log.
+
+
+class _Input:
+    """An input probe that records the time of every read and answers `answer(now)`."""
+
+    def __init__(self, answer) -> None:
+        self.answer = answer
+        self.reads: list[datetime] = []
+
+    def last_input(self, now: datetime) -> datetime | None:
+        self.reads.append(now)
+        return self.answer(now)
+
+
+def _inputs() -> list[tuple[str, datetime, str, str]]:
+    return [
+        (str(e.source), e.ts, str(e.confidence), e.data.get("detail", ""))
+        for e in _ledger()
+        if e.event is EventType.INPUT
+    ]
+
+
+_UNLOCKED_AT = _T0 + timedelta(seconds=2)
+_STANDBY = _tick(3) + timedelta(seconds=3)
+_WAKE = _tick(10) + timedelta(seconds=4)
+
+
+def _lid_sleep(log: _Log, reason: int) -> None:
+    """Unlocked, then a standby and a terminal 507 with `reason`; the 507 is read at tick 11."""
+    log.winlogon(_sens(5, _UNLOCKED_AT))
+    log.system(_506(_STANDBY, reason=15))
+    log.system(_507(_WAKE, reason=reason))
+
+
+@pytest.mark.parametrize("reason", [31, 32, 15, 1])
+def test_a_wake_for_a_user_input_on_an_unlocked_session_writes_one_observed_input_at_the_507(cfg, reason):
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _lid_sleep(log, reason)
+    _run(cfg, clock, log, 16)
+
+    assert _inputs() == [("eventlog", _WAKE, "observed", f"System Kernel-Power 507 reason {reason}")]
+    # The cursor stays on the suspend, so the 507 was read again on every tick after it: still one input.
+    assert log.reads(SYSTEM_CHANNEL) > 5
+
+
+@pytest.mark.parametrize("reason", [55, 20, 28, 12])
+def test_a_wake_for_any_other_reason_writes_no_input(cfg, reason):
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _lid_sleep(log, reason)
+    _run(cfg, clock, log, 16)
+    assert _inputs() == []
+
+
+@pytest.mark.parametrize(
+    "lock", [_STANDBY + timedelta(minutes=1), _WAKE], ids=["during the standby", "at the 507"]
+)
+def test_a_wake_on_a_locked_session_writes_no_input(cfg, lock):
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _lid_sleep(log, 32)
+    log.winlogon(_sens(4, lock))
+    _run(cfg, clock, log, 16)
+    assert _inputs() == []
+
+
+def test_a_wake_with_no_session_record_before_it_writes_no_input(cfg):
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    log.system(_506(_STANDBY))
+    log.system(_507(_WAKE, reason=32))
+    _run(cfg, clock, log, 16)
+    assert _inputs() == []
+
+
+def test_a_wake_backfilled_into_a_gap_writes_its_input(cfg):
+    stop = _T0 - timedelta(hours=1)
+    _put(EventType.COLLECTOR_START, stop - timedelta(hours=1), reason="launch")
+    _put(EventType.UNLOCK, stop - timedelta(minutes=50), Source.EVENTLOG, detail=_UNLOCK)
+    _put(EventType.COLLECTOR_STOP, stop, reason="unclean")
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _history(log)
+    log.winlogon(_sens(5, stop - timedelta(minutes=50)))
+    standby = stop + timedelta(minutes=5)
+    wake = stop + timedelta(minutes=40)
+    log.system(_506(standby))
+    log.system(_507(wake, reason=31))
+    _run(cfg, clock, log, 3)
+
+    assert _inputs() == [("eventlog", wake, "observed", "System Kernel-Power 507 reason 31")]
+
+
+def test_a_wake_already_in_the_ledger_without_its_input_gets_it_on_the_next_read(cfg):
+    """A crash between the 507's append and its input's: the re-read skips the wake and writes the input."""
+    stop = _T0 - timedelta(hours=1)
+    standby = stop - timedelta(minutes=30)
+    wake = stop - timedelta(minutes=10)
+    _put(EventType.COLLECTOR_START, stop - timedelta(hours=2), reason="launch")
+    _put(EventType.UNLOCK, stop - timedelta(minutes=50), Source.EVENTLOG, detail=_UNLOCK)
+    _put(EventType.SUSPEND, standby, Source.EVENTLOG, detail=_STANDBY_506)
+    _put(EventType.RESUME, wake, Source.EVENTLOG, detail=_WAKE_507)
+    _put(EventType.COLLECTOR_STOP, stop, reason="unclean")
+    _checkpoint(stop, system_cursor=standby.isoformat(), winlogon_cursor=stop.isoformat(), pending=[])
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _history(log)
+    log.winlogon(_sens(5, stop - timedelta(minutes=50)))
+    log.system(_506(standby))
+    log.system(_507(wake))
+    _run(cfg, clock, log, 3)
+
+    assert _inputs() == [("eventlog", wake, "observed", _WAKE_507)]
+    assert [line for line in _lines() if line[0] == "resume"] == [
+        ("resume", "eventlog", wake, "observed", _WAKE_507)
+    ]
+
+
+def test_an_input_from_the_wake_reason_means_no_input_read(cfg):
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _lid_sleep(log, 32)
+    probe = _Input(lambda now: now)
+    _run(cfg, clock, log, 16, input_probe=probe)
+    assert probe.reads == []
+    assert [source for source, *_ in _inputs()] == ["eventlog"]
+
+
+def test_win32_input_feeds_presence_through_replay_without_inventing_time(cfg):
+    """A lid closed on an unlocked session and an Austerity wake (507 reason 55) before the deferred lock: no input from the wake reason. The probe is not read while the System log says asleep, and is read from the tick that reads the 507. Its first answer is the last keystroke before the lid closed, which is not evidence of the wake; the second is real input 40 s after it. Presence resumes at that input, not at the wake."""
+    clock = _Clock(_T0)
+    log = _Log(clock)
+    _lid_sleep(log, 55)
+    typed = _WAKE + timedelta(seconds=40)
+    before_sleep = _STANDBY - timedelta(minutes=1)
+    probe = _Input(lambda now: typed if now >= typed else before_sleep)
+    _run(cfg, clock, log, 16, input_probe=probe)
+
+    assert probe.reads == [_tick(11), _tick(12)]
+    assert _inputs() == [("win32", typed, "observed", "")]
+    shape = [(i.kind, i.start, i.end, str(i.confidence), str(i.source)) for i in replay(_ledger()).intervals]
+    assert shape == [
+        (IntervalType.UNEVIDENCED, _T0, _UNLOCKED_AT, "observed", "collector"),
+        (IntervalType.PRESENT, _UNLOCKED_AT, _STANDBY, "observed", "eventlog"),
+        (IntervalType.ASLEEP, _STANDBY, _WAKE, "observed", "eventlog"),
+        (IntervalType.UNEVIDENCED, _WAKE, typed, "observed", "eventlog"),
+        (IntervalType.PRESENT, typed, _tick(16), "observed", "win32"),
+        (IntervalType.DOWNTIME, _tick(16), None, "observed", "collector"),
+    ]

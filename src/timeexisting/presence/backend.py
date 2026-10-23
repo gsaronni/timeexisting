@@ -1,13 +1,13 @@
-"""The presence backend registry (roadmap section 6): which event log and which session probe this platform has, and the readers that join the I/O seams to the pure parser.
+"""The presence backend registry (roadmap section 6): which event log, session probe and input probe this platform has, and the readers that join the I/O seams to the pure parser.
 
-Windows-only modules are imported lazily, inside the registry entries, so this module imports on every platform. Windows is the only live backend in phase 3; a platform without one (Linux until the Fedora backend, Termux) gets `NoEventLog` and `NoSessionProbe`, which return nothing. A query or probe failure is logged and returns nothing: it never stops the collector and never asks for elevation.
+Windows-only modules are imported lazily, inside the registry entries, so this module imports on every platform. Windows is the only live backend in phase 3; a platform without one (Linux until the Fedora backend, Termux) gets `NoEventLog`, `NoSessionProbe` and `NoInput`, which return nothing. A query or probe failure is logged and returns nothing: it never stops the collector and never asks for elevation.
 """
 
 import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -202,6 +202,49 @@ class Win32Session:
             return None
 
 
+# `LASTINPUTINFO.dwTime` and `GetTickCount` are 32-bit millisecond counts that wrap after about 49.7 days.
+TICK_MASK = 0xFFFFFFFF
+
+
+def input_time(now: datetime, last_input: int, tick_count: int) -> datetime:
+    """The time of the last input, given `now` and the two 32-bit counts read together at `now`. The elapsed time is their unsigned 32-bit difference, so a count that wrapped between the input and the read still gives the small, correct span."""
+    return now - timedelta(milliseconds=(tick_count - last_input) & TICK_MASK)
+
+
+class InputProbe(Protocol):
+    def last_input(self, now: datetime) -> datetime | None:
+        """When this session last saw user input, aware UTC, from counts read at `now`; `None` when it cannot be read."""
+        ...
+
+
+class NoInput:
+    """A platform without an input probe: never any input."""
+
+    def last_input(self, now: datetime) -> datetime | None:  # noqa: ARG002
+        return None
+
+
+class Win32Input:
+    """The Windows input probe through one seam, `read()`, which returns `LASTINPUTINFO.dwTime` and `GetTickCount()` read together and raises `OSError` on failure. A failure reads as `None` and is logged once when a streak of failures starts and once when it ends, never every tick."""
+
+    def __init__(self, read: Callable[[], tuple[int, int]]) -> None:
+        self._read = read
+        self._failing = False
+
+    def last_input(self, now: datetime) -> datetime | None:
+        try:
+            last, ticks = self._read()
+        except OSError as error:
+            if not self._failing:
+                logger.warning("last input unreadable, reading none until it recovers: %s", error)
+                self._failing = True
+            return None
+        if self._failing:
+            logger.info("last input readable again")
+            self._failing = False
+        return input_time(now, last, ticks)
+
+
 def _windows() -> EventLogReader:
     from timeexisting.presence import eventlog_win32
 
@@ -216,9 +259,16 @@ def _windows_session() -> SessionProbe:
     return Win32Session(desktop_win32.session_state, desktop_win32.logon_time)
 
 
+def _windows_input() -> InputProbe:
+    from timeexisting.presence import input_win32
+
+    return Win32Input(input_win32.last_input)
+
+
 # Keyed by `sys.platform`. The Fedora D-Bus backend (section 18) goes here when it can be live-checked.
 _REGISTRY: dict[str, Callable[[], EventLogReader]] = {"win32": _windows}
 _SESSION_REGISTRY: dict[str, Callable[[], SessionProbe]] = {"win32": _windows_session}
+_INPUT_REGISTRY: dict[str, Callable[[], InputProbe]] = {"win32": _windows_input}
 
 
 def event_log(platform: str = sys.platform) -> EventLogReader:
@@ -243,3 +293,15 @@ def session_probe(platform: str = sys.platform) -> SessionProbe:
     except (ImportError, OSError) as error:
         logger.warning("session probe backend for %s unavailable: %s", platform, error)
         return NoSessionProbe()
+
+
+def input_probe(platform: str = sys.platform) -> InputProbe:
+    """The input probe for `platform`, or `NoInput` when it has no backend or its backend cannot load."""
+    factory = _INPUT_REGISTRY.get(platform)
+    if factory is None:
+        return NoInput()
+    try:
+        return factory()
+    except (ImportError, OSError) as error:
+        logger.warning("input probe backend for %s unavailable: %s", platform, error)
+        return NoInput()

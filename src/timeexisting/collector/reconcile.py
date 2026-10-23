@@ -9,6 +9,8 @@ The cursors and the caller contract of `eventlog.boundaries()`:
 - The Winlogon cursor moves to the last record returned.
 - A cursor moves only after the append, so a crash can repeat a record but never lose one.
 
+Input evidence from the wake reason (roadmap section 6, phase 3 step 7). A terminal Kernel-Power 507 whose reason names a user input (`eventlog.INPUT_REASONS`) and that ends a sleep on an unlocked session is written as `input`, source `eventlog`, `observed`, at the 507's own time, with the 507's `detail`. The session at that time comes from the `Evidence` tracker, asked after both channels are read in the same tick, so a lock Winlogon recorded during the standby counts. A lock at the same time as the 507 means locked. Because it comes from the log, it also works for a 507 backfilled into a gap between runs.
+
 Re-reading from the cursor returns records already written. The ledger records transitions only, so nothing is appended twice: a record whose key (event, time, `detail`, which is what replay deduplicates on) is already in the ledger at or after the cursor is skipped. The key set is built at start from this host's records in every shard, and keys before a cursor are dropped as it advances, so the set stays bounded by what one read can return.
 """
 
@@ -18,17 +20,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from timeexisting.collector.evidence import Evidence
 from timeexisting.ledger.events import Confidence, Event, EventType, Source
 from timeexisting.ledger.replay import Coverage
-from timeexisting.presence.backend import ChannelCheck, EventLogReader
-from timeexisting.presence.eventlog import SYSTEM_CHANNEL, WINLOGON_CHANNEL, Boundary
+from timeexisting.presence.backend import ChannelCheck, EventLogReader, SessionState
+from timeexisting.presence.eventlog import INPUT_REASONS, SYSTEM_CHANNEL, WINLOGON_CHANNEL, Boundary
 
 logger = logging.getLogger(__name__)
 
 # How long a pending sleep gap waits for its System log record before it is written from the clock (section 8).
 PENDING_WINDOW = timedelta(minutes=2)
 
-_SYSTEM_EVENTS = frozenset({EventType.SUSPEND, EventType.RESUME, EventType.BOOT})
+# The System log's own records, and the `input` written from a 507 beside them: their keys share the System cursor.
+_SYSTEM_EVENTS = frozenset({EventType.SUSPEND, EventType.RESUME, EventType.BOOT, EventType.INPUT})
 _SESSION_EVENTS = frozenset({EventType.LOCK, EventType.UNLOCK})
 # The boundaries the System cursor may stand on: the start of a sleep, or a boot.
 _CURSOR_EVENTS = frozenset({EventType.SUSPEND, EventType.BOOT})
@@ -143,7 +147,7 @@ def coverage(
 class Reconciler:
     """Reads the event logs for one run and appends what they record. `reader` is `None`, or `channels` says a channel is unreadable, when there is nothing to read: then a clock jump is written from the clock at once, and a WTS-only run reads no Winlogon records.
 
-    `state` is the checkpoint's; a cursor still `None` starts at `read_from`. `ledger` is every event already in the ledger, from every shard: this host's `eventlog` records at or after each cursor seed the key set. `append` writes one event to this host's shard.
+    `state` is the checkpoint's; a cursor still `None` starts at `read_from`. `ledger` is every event already in the ledger, from every shard: this host's `eventlog` records at or after each cursor seed the key set. `append` writes one event to this host's shard. `evidence`, when given, hears every event this reconciler appends and answers the session at a 507; without it no input is written.
     """
 
     def __init__(
@@ -155,12 +159,14 @@ class Reconciler:
         host: str,
         ledger: Iterable[Event],
         append: Append,
+        evidence: Evidence | None = None,
     ) -> None:
         self.state = state
+        self._evidence = evidence
         self._reader = reader
         self._system = reader is not None and channels is not None and channels.system
         self._winlogon = reader is not None and channels is not None and channels.winlogon
-        self._append = append
+        self._write = append
         if state.system_cursor is None:
             state.system_cursor = read_from
         if state.winlogon_cursor is None:
@@ -176,6 +182,18 @@ class Reconciler:
             elif event.event in _SESSION_EVENTS and event.ts >= state.winlogon_cursor:
                 self._session_keys.add(key)
 
+    def _append(
+        self,
+        ts: datetime,
+        event: EventType,
+        source: Source,
+        confidence: Confidence,
+        data: Mapping[str, str] | None = None,
+    ) -> None:
+        self._write(ts, event, source, confidence, data)
+        if self._evidence is not None:
+            self._evidence.heard(ts, event, source, (data or {}).get("boot_kind"))
+
     def jump(self, start: datetime, wake: datetime) -> None:
         """A clock jump from the tick at `start` to the tick at `wake`. Held as pending for the System log when it is readable; written from the clock at once when it is not."""
         gap = PendingGap(start, wake)
@@ -185,10 +203,13 @@ class Reconciler:
             self._write_clock(gap)
 
     def tick(self, now: datetime) -> None:
-        """One reconciliation pass at `now`: the System log, then Winlogon/Operational, then the pending gaps."""
+        """One reconciliation pass at `now`: the System log, then Winlogon/Operational, then input from the 507s read, then the pending gaps."""
+        cursor = self.state.system_cursor
         found = self._read_system(now) if self._system else []
         if self._winlogon:
             self._read_winlogon()
+        if cursor is not None:
+            self._input(found, cursor)
         self._settle(now, found)
 
     def flush(self) -> None:
@@ -232,6 +253,28 @@ class Reconciler:
         if latest > cursor:
             self.state.winlogon_cursor = latest
             self._session_keys = {key for key in self._session_keys if key[1] >= latest}
+
+    def _input(self, found: list[Boundary], cursor: datetime) -> None:
+        """`input` for each wake in `found`, at or after the cursor the read started from, whose 507 reason names a user input and whose session was unlocked. Keyed like the boundaries, so a re-read writes nothing twice, and a crash between a wake and its input writes the input on the next read."""
+        if self._evidence is None:
+            return
+        for boundary in found:
+            if boundary.event is not EventType.RESUME or boundary.reason not in INPUT_REASONS:
+                continue
+            key = (EventType.INPUT, boundary.time, boundary.detail)
+            if boundary.time < cursor or key in self._system_keys:
+                continue
+            if self._evidence.session_at(boundary.time) is not SessionState.UNLOCKED:
+                continue
+            logger.info("input from the wake at %s: %s", boundary.time.isoformat(), boundary.detail)
+            self._append(
+                boundary.time,
+                EventType.INPUT,
+                Source.EVENTLOG,
+                Confidence.OBSERVED,
+                {"detail": boundary.detail},
+            )
+            self._system_keys.add(key)
 
     def _settle(self, now: datetime, found: list[Boundary]) -> None:
         waiting: list[PendingGap] = []

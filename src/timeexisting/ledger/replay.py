@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import Enum, StrEnum, auto
 
-from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source
+from timeexisting.ledger.events import Confidence, Event, EventType, NoteKind, Source, order_key, tie_rank
 from timeexisting.presence.eventlog import BootKind
 
 _BOOLEANS = {"true": True, "false": False}
@@ -61,7 +61,7 @@ class Gap:
 
 @dataclass(frozen=True, slots=True)
 class Timeline:
-    """Every event in `(ts, id)` order, nothing collapsed, plus what is derived from them, each sorted by start then host: the typed `intervals`, and the collector's runs (`presences`) and the `gaps` between them. `presences` is collector liveness, not user presence; it feeds the start suggestion until the start resolution of roadmap section 4 replaces it."""
+    """Every event in `events.order_key` order, nothing collapsed, plus what is derived from them, each sorted by start then host: the typed `intervals`, and the collector's runs (`presences`) and the `gaps` between them. `presences` is collector liveness, not user presence; it feeds the start suggestion until the start resolution of roadmap section 4 replaces it."""
 
     events: tuple[Event, ...]
     intervals: tuple[Interval, ...]
@@ -195,7 +195,7 @@ DELIBERATE_REASONS = frozenset({"stop_file", "signal", "console_close", "max_tic
 
 @dataclass(frozen=True, slots=True)
 class _Boundary:
-    """One state change, at the time replay places it: the event's own time, or for a transition matched to an `eventlog` record, the record's. `tick` is true for a boundary from a clock jump, which sits on a collector tick: the last tick before the jump for the sleep, the first tick after it for the wake."""
+    """One state change, at the time replay places it: the event's own time, or for a transition matched to an `eventlog` record, the record's. `tick` is true for a boundary from a clock jump, which sits on a collector tick: the last tick before the jump for the sleep, the first tick after it for the wake. `rank` is the event's `events.tie_rank`, so boundaries at one time sort like their events."""
 
     ts: datetime
     id: str
@@ -203,6 +203,7 @@ class _Boundary:
     source: Source
     confidence: Confidence
     tick: bool = False
+    rank: int = 0
 
 
 @dataclass(slots=True)
@@ -274,8 +275,8 @@ class _State:
         return IntervalType.UNEVIDENCED
 
 
-def _by_time(event: Event) -> tuple[datetime, str]:
-    return (event.ts, event.id)
+def _by_time(event: Event) -> tuple[datetime, int, str]:
+    return order_key(event)
 
 
 def _deduplicated(events: Iterable[Event]) -> list[Event]:
@@ -302,6 +303,7 @@ def _boundary(
         event.source,
         confidence or event.confidence,
         tick or event.source is Source.CLOCK,
+        tie_rank(event.event),
     )
 
 
@@ -421,7 +423,7 @@ def _boundaries(events: Sequence[Event], micro_max: timedelta) -> list[_Boundary
             boundaries.append(_boundary(event, _Step.START, Confidence.INFERRED, tick=True))
         else:
             boundaries.append(_boundary(event, _STEP_OF[event.event]))
-    return sorted(boundaries, key=lambda boundary: (boundary.ts, boundary.id))
+    return sorted(boundaries, key=lambda boundary: (boundary.ts, boundary.rank, boundary.id))
 
 
 def _lost_at_record(event: Event, step: _Step) -> bool:
@@ -505,7 +507,7 @@ def _inferred(event: Event) -> bool:
 
 
 def replay(events: Iterable[Event], *, micro_max: timedelta = timedelta()) -> Timeline:
-    """Derive the typed timeline (roadmap section 6) and the collector's runs. Input order is not trusted: events are sorted by `(ts, id)` first.
+    """Derive the typed timeline (roadmap section 6) and the collector's runs. Input order is not trusted: events are sorted by `events.order_key` first, `(ts, tie_rank, id)`, which puts an `input` after the `resume` it shares a time with and a `lock` after an `unlock` or `input` at the same time.
 
     Typed intervals: present means awake, unlocked and evidenced. `unlock`, and `input` while awake on an unlocked session, open presence; `lock`, `suspend` and a `collector_stop` close it. Collector liveness with no session event is `unevidenced`, never `present`. Live and inferred session and machine transitions take their `eventlog` partner's time, never across a `collector_stop`; repeated `eventlog` records count once. A phase 2 `suspended` stop with its `resumed` start reads as an inferred suspend and resume.
 

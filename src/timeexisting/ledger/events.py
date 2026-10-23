@@ -45,6 +45,20 @@ class EventType(StrEnum):
     VOID = "void"
 
 
+# The order of events that share a timestamp (phase 3 step 7b). Ids are UUIDv7 and sort by the wall clock at the write, so two writes of one instant from different runs, or after a backwards clock change, can sort either way. Only two types need a rule: `input` sorts after the `resume` it shares a time with, so replay does not apply it while asleep; `lock` sorts after `unlock` and `input` at the same time, so a lock at a time always wins. Every other type keeps id order, since the three ties the collector writes today (a `collector_stop` before a restart's `collector_start`, that start before the startup probe's `unlock`, and an `unlock` before a `collector_stop`) have no order by type that satisfies all three.
+_TIE_RANK = {EventType.INPUT: 1, EventType.LOCK: 2}
+
+
+def tie_rank(event_type: EventType) -> int:
+    """The rank of `event_type` among events at one timestamp: 1 for `input`, 2 for `lock`, 0 for everything else."""
+    return _TIE_RANK.get(event_type, 0)
+
+
+def order_key(event: Event) -> tuple[datetime, int, str]:
+    """The one sort key for events: `(ts, tie_rank, id)`. Replay and the collector's evidence tracker both sort by it."""
+    return (event.ts, tie_rank(event.event), event.id)
+
+
 class Source(StrEnum):
     WIN32 = "win32"
     WTS = "wts"

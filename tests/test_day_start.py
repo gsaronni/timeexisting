@@ -156,7 +156,16 @@ def test_a_resume_onto_an_unlocked_session_is_not_a_start_until_input_arrives(cf
     assert _resolve(unevidenced, cfg) is None
 
     evidenced = [*unevidenced, _event(_local(_DAY, 7, 30), EventType.INPUT, Source.WIN32)]
-    assert _resolve(evidenced, cfg) == DayStart(time(7, 30), Provenance.OBSERVED)
+    # The session the input lands on was opened by the startup probe, so the presence it evidences is inferred (step 9b); from a logon it is observed.
+    assert _resolve(evidenced, cfg) == DayStart(time(7, 30), Provenance.INFERRED)
+    from_logon = [
+        _event(_local(28, 16, 0), EventType.COLLECTOR_START, Source.COLLECTOR, reason="launch"),
+        _event(_local(28, 16, 0), EventType.UNLOCK, Source.LOGON),
+        *unlocked_sleep[2:],
+        *unevidenced[3:],
+        evidenced[-1],
+    ]
+    assert _resolve(from_logon, cfg) == DayStart(time(7, 30), Provenance.OBSERVED)
 
 
 def test_collector_liveness_alone_is_never_a_start(cfg):

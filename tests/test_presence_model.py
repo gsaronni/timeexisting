@@ -863,10 +863,10 @@ def test_an_uncovered_gap_shorter_than_micro_max_folds_carrying_the_state(length
         micro_max=micro_max,
     )
     if folded:
+        # The session carried through the fold is unverified, so the run after it stays inferred and merges with the fold (step 9b).
         assert timeline == (
             iv(PRESENT, _t(13, 8, 0), gap_start),
-            iv(PRESENT, gap_start, gap_end, Source.COLLECTOR, INF),
-            iv(PRESENT, gap_end, None, Source.COLLECTOR),
+            iv(PRESENT, gap_start, None, Source.COLLECTOR, INF),
         )
     else:
         assert [interval.kind for interval in timeline] == [PRESENT, DOWNTIME, UNEVIDENCED]
@@ -1089,7 +1089,7 @@ def test_an_unlock_at_the_time_of_a_stop_stays_in_id_order(unlock_first):
 
 @pytest.mark.parametrize("start_first", [True, False], ids=["start-id-first", "unlock-id-first"])
 def test_the_startup_probes_unlock_at_the_start_stays_in_id_order(start_first):
-    """Not ranked: the collector writes the start before the probe's unlock, and the id order keeps the presence it opens `inferred`, from the probe. The reverse order would open it from the start, observed."""
+    """Not ranked: the collector writes the start before the probe's unlock, and the id order keeps the presence it opens from the probe. The reverse order opens it from the start; since step 9b the probe's inferred session fact carries into that interval, so both orders read inferred and only the source follows the id order."""
     restart = _t(13, 10, 20)
     start_id, unlock_id = (1, 2) if start_first else (2, 1)
     timeline = intervals(
@@ -1102,7 +1102,7 @@ def test_the_startup_probes_unlock_at_the_start_stays_in_id_order(start_first):
     expected = (
         iv(PRESENT, restart, None, Source.PROBE, INF)
         if start_first
-        else iv(PRESENT, restart, None, Source.COLLECTOR)
+        else iv(PRESENT, restart, None, Source.COLLECTOR, INF)
     )
     assert timeline[-1] == expected
 

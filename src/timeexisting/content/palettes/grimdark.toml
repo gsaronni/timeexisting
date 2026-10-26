@@ -49,6 +49,13 @@ working   = "cyan"
 post_work = "green"
 weekend   = "magenta"
 
+# The footer's derived state, keyed by interval type (roadmap section 6).
+[state]
+present     = "green"
+away        = "yellow"
+asleep      = "blue"
+unevidenced = "dark_orange3"
+
 [progress]
 low  = "red"
 mid  = "yellow"

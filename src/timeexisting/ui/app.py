@@ -11,10 +11,13 @@ Each tick builds the day's `DayPlan` from the (already-localized) date and
 resolves it against the (already-localized) instant, so `Resolved.now` is
 directly usable by the panels without further conversion.
 
-The footer's second line reports the collector. The viewer is handed a
-callable returning the live collector's start time, or `None`, and asks it
-once per tick, so a collector that dies or appears while the dashboard is
-open is reported without a restart.
+The footer's second line reports the collector and the derived state of
+this host's ledger: present, away, asleep, unevidenced, or not observing,
+and since when (roadmap section 6). The viewer is handed a callable
+returning a `CollectorState` and asks it once per tick, so a collector that
+dies or appears while the dashboard is open is reported without a restart.
+The line trails the live session by up to one collector tick plus the event
+log lag, since it reads the ledger, never the session itself.
 """
 
 import time
@@ -34,6 +37,8 @@ from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock
 from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
+from timeexisting.domain.timeline_view import CollectorState
+from timeexisting.ledger.replay import IntervalType
 from timeexisting.ui.layout import build_layout
 from timeexisting.ui.panels import day, week, year
 from timeexisting.ui.theme import Theme, load_theme
@@ -58,12 +63,41 @@ def _update(
     layout["main"]["right"].update(day.render(resolved, theme, start_inferred=start_inferred))
 
 
-def _collector_line(since: datetime | None, spawn_failed: bool, theme: Theme) -> Text:
-    if since is not None:
-        text = pick("app.collector.alive").format(since=f"{_localize(since):%H:%M}")
-        return Text(text, style=theme.collector_alive, justify="center")
-    key = "app.collector.spawn_failed" if spawn_failed else "app.collector.absent"
-    return Text(pick(key), style=theme.collector_absent, justify="center")
+_STATE_KEYS = {
+    IntervalType.PRESENT: "present",
+    IntervalType.AWAY: "away",
+    IntervalType.ASLEEP: "asleep",
+    IntervalType.UNEVIDENCED: "unevidenced",
+}
+
+
+def _hhmm(moment: datetime | None) -> str:
+    return "" if moment is None else f"{_localize(moment):%H:%M}"
+
+
+def collector_phrase(state: CollectorState, spawn_failed: bool) -> str:
+    """The footer's sentence for `state`, which `te collect status` prints too. Without a collector: the failed spawn, else not observing since the last checkpoint, else plain absence. With one: the open interval's state and start, or the collector's own start when the ledger holds no open interval."""
+    if not state.running:
+        if spawn_failed:
+            return pick("app.collector.spawn_failed")
+        if state.since is None:
+            return pick("app.collector.absent")
+        return pick("app.collector.not_observing").format(since=_hhmm(state.since))
+    key = _STATE_KEYS.get(state.kind) if state.kind is not None else None
+    if key is None:
+        return pick("app.collector.alive").format(since=_hhmm(state.since))
+    return pick(f"app.collector.state.{key}").format(since=_hhmm(state.since))
+
+
+def _collector_style(state: CollectorState, theme: Theme) -> str:
+    if not state.running:
+        return theme.collector_absent
+    key = _STATE_KEYS.get(state.kind) if state.kind is not None else None
+    return theme.collector_alive if key is None else theme.state[key]
+
+
+def _collector_line(state: CollectorState, spawn_failed: bool, theme: Theme) -> Text:
+    return Text(collector_phrase(state, spawn_failed), style=_collector_style(state, theme), justify="center")
 
 
 def _footer(text: str, collector: Text | None, theme: Theme) -> Text:
@@ -83,11 +117,11 @@ def run(
     refresh_hz: float = 1.0,
     label: str = "",
     console: Console | None = None,
-    collector_since: Callable[[], datetime | None] | None = None,
+    collector_state: Callable[[], CollectorState] | None = None,
     spawn_failed: bool = False,
     start_inferred: bool = False,
 ) -> None:
-    """`collector_since` returns the live collector's start time, or `None` when none runs; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock. `start_inferred` says `start` was inferred (roadmap section 4), which the day panel shows."""
+    """`collector_state` returns whether a collector runs and the derived state of this host's ledger; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock. `start_inferred` says `start` was inferred (roadmap section 4), which the day panel shows."""
     theme = load_theme()
     layout = build_layout(theme)
     console = console or Console()
@@ -103,11 +137,11 @@ def run(
         with Live(layout, console=console, refresh_per_second=refresh_hz, screen=True):
             while True:
                 collector = None
-                if collector_since is not None:
-                    since = collector_since()
+                if collector_state is not None:
+                    state = collector_state()
                     # Once a collector has been seen, a later absence is a stop, not a failed spawn.
-                    spawn_failed = spawn_failed and since is None
-                    collector = _collector_line(since, spawn_failed, theme)
+                    spawn_failed = spawn_failed and not state.running
+                    collector = _collector_line(state, spawn_failed, theme)
                 layout["footer"].update(_footer(footer_text, collector, theme))
                 now_local = _localize(clock.now())
                 plan = build_day(now_local.date(), start, flags, cfg)

@@ -7,8 +7,9 @@ import sys
 import threading
 import time as time_module
 from collections.abc import Callable
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from importlib.resources import files
+from zoneinfo import ZoneInfo
 
 from timeexisting import logging_setup, paths
 from timeexisting.collector import daemon, lockfile, spawn
@@ -19,15 +20,25 @@ from timeexisting.domain.clock import Clock, FixedClock, SystemClock
 from timeexisting.domain.day_start import DayStart, Provenance, resolve_day_start
 from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
+from timeexisting.domain.timeline_view import (
+    CollectorState,
+    DayRow,
+    current_state,
+    day_bounds,
+    day_events,
+    day_rows,
+    hosts_on,
+)
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Event, EventType, Source, profile_for
-from timeexisting.ledger.replay import replay
+from timeexisting.ledger.replay import IntervalType, Timeline, replay
 from timeexisting.presence import backend
-from timeexisting.ui.app import local_timezone, run, run_demo
+from timeexisting.ui.app import collector_phrase, local_timezone, run, run_demo
 
 logger = logging.getLogger(__name__)
 
 _AT_FORMAT = "%Y-%m-%d %H:%M"
+_DATE_FORMAT = "%Y-%m-%d"
 _START_FORMAT = "%H:%M"
 
 _FLAG_NAMES: dict[str, DayFlag] = {
@@ -61,6 +72,13 @@ def _start_type(value: str) -> time:
         return datetime.strptime(value, _START_FORMAT).time()  # noqa: DTZ007 -- wall-clock text, no date involved
     except ValueError as error:
         raise argparse.ArgumentTypeError(f'must look like "08:30": {error}') from error
+
+
+def _date_type(value: str) -> date:
+    try:
+        return datetime.strptime(value, _DATE_FORMAT).date()  # noqa: DTZ007 -- a calendar date, no time involved
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f'must look like "2026-10-16": {error}') from error
 
 
 def _flag_type(value: str) -> DayFlag:
@@ -183,6 +201,18 @@ def build_parser() -> argparse.ArgumentParser:
     collect_subparsers = collect_parser.add_subparsers(dest="collect_command")
     collect_subparsers.add_parser("status", help="Report the running collector, if any.")
     collect_subparsers.add_parser("stop", help="Ask the running collector to stop and wait for it.")
+    timeline_parser = collect_subparsers.add_parser(
+        "timeline", help="Print one day's typed intervals from the ledger. Read-only; needs no collector."
+    )
+    timeline_parser.add_argument(
+        "--date",
+        type=_date_type,
+        metavar="YYYY-MM-DD",
+        help="The local day to print; today when omitted.",
+    )
+    timeline_parser.add_argument(
+        "--events", action="store_true", help="Also list the day's ledger events below the intervals."
+    )
 
     return parser
 
@@ -207,18 +237,25 @@ def _in_night_window(moment: time, cfg: Config) -> bool:
     return moment >= night_start or moment < night_end  # wraps midnight, e.g. 22:00-06:00
 
 
+def _replay_shard(host: str, cfg: Config) -> Timeline | None:
+    """This host's shard replayed with `absence.micro_max`, the one replay every reader in the viewer shares, or `None` when the shard cannot be read."""
+    try:
+        result = store.read_shard(store.shard_path(host))
+    except OSError:
+        return None
+    return replay(result.events, micro_max=cfg.absence.micro_max)
+
+
 def _ledger_start(
     now: datetime, cfg: Config, *, boot_time: Callable[[], datetime | None] | None = None
 ) -> DayStart | None:
     """Today's start from this host's shard (roadmap section 4): a recorded `day_start`, else the first present instant of the typed timeline, with `boot_time`, by default the collector's `system_boot_time` seam, as the sanity clamp of rule 4. A ledger that cannot be read holds no start rather than failing the launch."""
     host = paths.current_host()
-    try:
-        result = store.read_shard(store.shard_path(host))
-    except OSError:
+    timeline = _replay_shard(host, cfg)
+    if timeline is None:
         logger.exception("could not read the ledger for the day start")
         return None
     boot = (boot_time or daemon.system_boot_time)()
-    timeline = replay(result.events, micro_max=cfg.absence.micro_max)
     resolved = resolve_day_start(timeline, host, now, cfg, boot=boot)
     logger.info("day start from the ledger: %s (boot %s)", resolved, boot)
     return resolved
@@ -383,7 +420,8 @@ def _collect_run(cfg: Config) -> None:
         raise SystemExit(1) from error
 
 
-def _collect_status() -> None:
+def _collect_status(cfg: Config) -> None:
+    """The lock's owner, then the derived state of this host's ledger when it holds an open interval: the footer's sentence, printed once."""
     owner = lockfile.status(daemon.ROLE)
     if owner is None:
         print(pick("collect.status.not_running"))
@@ -392,6 +430,85 @@ def _collect_status() -> None:
     print(
         pick("collect.status.running").format(pid=owner.pid, host=owner.host, since=f"{since:%Y-%m-%d %H:%M}")
     )
+    state = _LedgerState(cfg)()
+    if state.kind is not None:
+        print(collector_phrase(state, False))
+
+
+def _duration_text(duration: timedelta) -> str:
+    hours, remainder = divmod(int(duration.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return pick("collect.timeline.hours").format(hours=hours, minutes=minutes)
+    if minutes:
+        return pick("collect.timeline.minutes").format(minutes=minutes)
+    return pick("collect.timeline.seconds").format(seconds=seconds)
+
+
+def _row_text(row: DayRow, zone: ZoneInfo, day_end: datetime) -> str:
+    end = "24:00" if row.end == day_end else f"{row.end.astimezone(zone):%H:%M}"
+    return (
+        pick("collect.timeline.row")
+        .format(
+            start=f"{row.start.astimezone(zone):%H:%M}",
+            end=end,
+            kind=str(row.kind),
+            confidence=str(row.confidence),
+            source=str(row.source),
+            duration=_duration_text(row.duration),
+            tail=pick("collect.timeline.open") if row.open else "",
+        )
+        .rstrip()
+    )
+
+
+def _event_text(event: Event, zone: ZoneInfo) -> str:
+    detail = event.data.get("detail") or event.data.get("reason") or event.data.get("kind") or ""
+    return (
+        pick("collect.timeline.event_row")
+        .format(
+            time=f"{event.ts.astimezone(zone):%H:%M:%S}",
+            kind=str(event.event),
+            source=str(event.source),
+            confidence=str(event.confidence),
+            detail=detail,
+        )
+        .rstrip()
+    )
+
+
+def _collect_timeline(
+    cfg: Config,
+    day: date,
+    now: datetime,
+    *,
+    events: bool = False,
+    write: Callable[[str], object] = print,
+    error: Callable[[str], object] = lambda text: print(text, file=sys.stderr),
+) -> None:
+    """`te collect timeline` (roadmap section 3): every shard replayed with `absence.micro_max`, and `day`'s intervals per host printed in the configured zone with type, confidence, source and duration. An open interval runs to `now`. With `events`, the day's ledger events follow each host's rows. Malformed lines are counted on stderr. Reads only; writes nothing."""
+    zone = ZoneInfo(cfg.display.timezone)
+    result = store.read_all()
+    timeline = replay(result.events, micro_max=cfg.absence.micro_max)
+    _, day_end = day_bounds(day, zone)
+    printed = False
+    for host in hosts_on(timeline, day, zone):
+        rows = day_rows(timeline, host, day, zone, now)
+        listed = day_events(timeline, host, day, zone) if events else ()
+        if not rows and not listed:
+            continue
+        printed = True
+        write(pick("collect.timeline.header").format(date=day.isoformat(), host=host, zone=zone.key))
+        for row in rows:
+            write(_row_text(row, zone, day_end))
+        if events:
+            write(pick("collect.timeline.events"))
+            for event in listed:
+                write(_event_text(event, zone))
+    if not printed:
+        write(pick("collect.timeline.empty").format(date=day.isoformat()))
+    if result.malformed:
+        error(pick("collect.timeline.malformed").format(count=result.malformed))
 
 
 def _collect_stop(cfg: Config, *, sleep: Callable[[float], object] = time_module.sleep) -> None:
@@ -409,18 +526,57 @@ def _collect_stop(cfg: Config, *, sleep: Callable[[float], object] = time_module
     raise SystemExit(1)
 
 
-def _run_collect_command(command: str | None, cfg: Config) -> None:
+def _run_collect_command(args: argparse.Namespace, cfg: Config) -> None:
+    command = args.collect_command
     if command is None:
         _collect_run(cfg)
     elif command == "status":
-        _collect_status()
+        _collect_status(cfg)
     elif command == "stop":
         _collect_stop(cfg)
+    elif command == "timeline":
+        now = SystemClock().now()
+        day = args.date or now.astimezone(ZoneInfo(cfg.display.timezone)).date()
+        _collect_timeline(cfg, day, now, events=args.events)
 
 
-def _collector_since() -> datetime | None:
-    owner = lockfile.status(daemon.ROLE)
-    return None if owner is None else owner.started
+def _checkpoint_since(host: str) -> datetime | None:
+    try:
+        return daemon.read_checkpoint(host)
+    except ValueError:
+        return None
+
+
+class _LedgerState:
+    """The footer's `CollectorState`, asked once per viewer tick. The lock says whether a collector runs; the derived state comes from this host's shard, replayed again only when the shard's size or mtime has changed, so a 1 Hz viewer does not replay the ledger every second. Without a collector, `since` is the last checkpoint tick, the closest thing to when observation stopped."""
+
+    def __init__(self, cfg: Config) -> None:
+        self._cfg = cfg
+        self._stamp: tuple[int, int] | None = None
+        self._derived: tuple[IntervalType, datetime] | None = None
+
+    def __call__(self) -> CollectorState:
+        host = paths.current_host()
+        owner = lockfile.status(daemon.ROLE)
+        if owner is None:
+            return CollectorState(running=False, kind=None, since=_checkpoint_since(host))
+        derived = self._current(host)
+        if derived is None:
+            return CollectorState(running=True, kind=None, since=owner.started)
+        kind, since = derived
+        return CollectorState(running=True, kind=kind, since=since)
+
+    def _current(self, host: str) -> tuple[IntervalType, datetime] | None:
+        try:
+            stat = store.shard_path(host).stat()
+            stamp: tuple[int, int] | None = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            stamp = None
+        if stamp is None or stamp != self._stamp:
+            timeline = _replay_shard(host, self._cfg)
+            self._derived = None if timeline is None else current_state(timeline, host)
+            self._stamp = stamp
+        return self._derived
 
 
 def _start_collector(args: argparse.Namespace) -> bool:
@@ -452,7 +608,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = _load_config_or_exit()
 
     if args.command == "collect":
-        _run_collect_command(args.collect_command, cfg)
+        _run_collect_command(args, cfg)
         return
 
     spawn_failed = _start_collector(args)
@@ -470,7 +626,7 @@ def main(argv: list[str] | None = None) -> None:
         start.start,
         flags,
         label=label,
-        collector_since=_collector_since,
+        collector_state=_LedgerState(cfg),
         spawn_failed=spawn_failed,
         start_inferred=start.provenance is Provenance.INFERRED,
     )

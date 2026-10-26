@@ -15,6 +15,13 @@ demo_tag = ["[DEMO]"]
 alive = ["The collector has kept its vigil since {since}."]
 absent = ["No collector watches. These hours go unrecorded."]
 spawn_failed = ["A collector was summoned and did not answer. These hours go unrecorded."]
+not_observing = ["Not observing since {since}. The hours since are nobody's."]
+
+[app.collector.state]
+present = ["Present since {since}. The ledger is watching. So is the contract."]
+away = ["Away since {since}. The screen is locked. The clock is not."]
+asleep = ["Asleep since {since}, as far as the ledger has heard. The wake has not been written yet."]
+unevidenced = ["Awake and unlocked since {since}, with no sign of you. Touch something."]
 
 [start]
 interrupted = [
@@ -39,6 +46,18 @@ not_running = ["No collector watches. Time passes unrecorded, which is its natur
 [collect.stop]
 stopped = ["The collector has stopped watching. The hours go back to being nobody's business."]
 timeout = ["The collector was told to stop and has not yet obeyed. It will read the order on its next tick."]
+
+[collect.timeline]
+header = ["{date}, {host}, {zone}"]
+row = ["{start}-{end}  {kind:<11}  {confidence:<8}  {source:<9}  {duration}{tail}"]
+open = ["  open"]
+events = ["events"]
+event_row = ["{time}  {kind:<15}  {source:<9}  {confidence:<8}  {detail}"]
+empty = ["No intervals on {date}. Either nothing happened, or nobody was watching."]
+malformed = ["{count} malformed ledger lines skipped."]
+hours = ["{hours}h {minutes:02d}m"]
+minutes = ["{minutes}m"]
+seconds = ["{seconds}s"]
 
 [common]
 current_time = ["Current time: {time}"]

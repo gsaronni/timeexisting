@@ -170,7 +170,7 @@ Give me the checklist below as one block, then wait while I run it over a workin
 3. Close the lid on an unlocked session for ten minutes: `asleep`, observed, with the `lock` at its `eventlog` time inside the `asleep` interval (a few minutes after the close), not at the wake.
 4. The overnight interval: no `present` time between leaving and the next morning's unlock, whatever dark wakes occurred.
 5. Kill the collector in Task Manager, stay at the unlocked laptop for three minutes, start `te`: about three minutes of `present`, `inferred`, no `downtime`, collector respawned.
-6. Restart the machine: `off`, then `logon`, with the boundaries from the boot records and Winlogon/Operational. Whether a `session_end` stop appears is not judged here: that is the open phase 2 defect, out of scope.
+6. Restart the machine: `off`, then `away` until the unlock, then `present` with source `logon`, with the boundaries from the boot records and Winlogon/Operational. Whether a `session_end` stop appears is not judged here: that is the open phase 2 defect, out of scope.
 7. The next morning, `te` opens without the start prompt and shows the observed start.
 8. Open a "Run as administrator" credential prompt, leave it up for 90 seconds, cancel it: no `lock` or `unlock` lines of any source, and no Winlogon/Operational 811 records in that span. This confirms that `SessionFlags` does not read the UAC secure desktop as a lock.
 9. Leave the laptop unlocked on battery until a dark wake or an Austerity wake (Kernel-Power 507 reason 20 or 55) lands on the unlocked session, or find one in the System log afterwards: no `win32` `input` at or after the 507 unless you touched the machine. This tells whether such a wake moves `GetLastInputInfo`. Added at step 7; open.

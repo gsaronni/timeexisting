@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 
@@ -9,8 +10,10 @@ from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.day_start import DayStart, Provenance
 from timeexisting.domain.schedule import DayFlag
+from timeexisting.domain.timeline_view import CollectorState
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source
+from timeexisting.ledger.replay import IntervalType
 
 
 def test_no_arguments_yields_a_system_clock():
@@ -397,12 +400,13 @@ def test_start_collector_reports_success_when_a_collector_runs(monkeypatch):
     assert cli._start_collector(cli.build_parser().parse_args([])) is False
 
 
-def test_collector_since_follows_the_lock():
-    assert cli._collector_since() is None
+def test_collector_state_follows_the_lock(cfg):
+    state = cli._LedgerState(cfg)
+    assert state() == CollectorState(running=False, kind=None, since=None)
     lock = lockfile.acquire("collector")
-    assert cli._collector_since() == lock.status.started
+    assert state() == CollectorState(running=True, kind=None, since=lock.status.started)
     lockfile.release(lock)
-    assert cli._collector_since() is None
+    assert state() == CollectorState(running=False, kind=None, since=None)
 
 
 def _interrupt(_prompt: str) -> str:
@@ -709,3 +713,207 @@ def test_flex_warning_every_line_names_the_start_and_the_band():
         assert "09:15" in text
         assert "08:00" in text
         assert "09:00" in text
+
+
+# --- Step 9: te collect timeline, the derived state ----------------------
+
+
+def _timeline_lines(cfg, day: date, now: datetime, **kwargs) -> tuple[list[str], list[str]]:
+    written: list[str] = []
+    errors: list[str] = []
+    cli._collect_timeline(cfg, day, now, write=written.append, error=errors.append, **kwargs)
+    return written, errors
+
+
+def _unclean_stop(ts: datetime) -> Event:
+    return Event.new(
+        ts=ts,
+        host=paths.current_host(),
+        profile="work",
+        event=EventType.COLLECTOR_STOP,
+        source=Source.COLLECTOR,
+        confidence=Confidence.INFERRED,
+        data={"reason": "unclean"},
+    )
+
+
+def _morning_ledger() -> None:
+    """Unlocked at 08:00 local, locked at 10:00, still locked."""
+    store.append(_ledger_event(_utc(29, 6, 0), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 6, 0), "unlock", Source.EVENTLOG))
+    store.append(_ledger_event(_utc(29, 8, 0), "lock", Source.EVENTLOG))
+
+
+def test_timeline_prints_the_days_rows_in_local_time(cfg):
+    _morning_ledger()
+    lines, errors = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))  # 11:00 local
+    assert lines[0] == f"2026-09-29, {paths.current_host()}, Europe/Copenhagen"
+    assert lines[1].split() == ["08:00-10:00", "present", "observed", "eventlog", "2h", "00m"]
+    assert lines[2].split() == ["10:00-11:00", "away", "observed", "eventlog", "1h", "00m", "open"]
+    assert len(lines) == 3
+    assert errors == []
+
+
+def test_timeline_date_picks_the_day_and_an_empty_day_says_so(cfg):
+    _morning_ledger()
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 28), _utc(29, 9, 0))
+    assert lines == [phrases.pick("collect.timeline.empty").format(date="2026-09-28")]
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))
+    assert len(lines) == 3
+
+
+def test_timeline_defaults_to_today_in_the_configured_zone(capsys, monkeypatch):
+    _morning_ledger()
+    monkeypatch.setattr(cli, "SystemClock", lambda: FixedClock(_utc(29, 9, 0)))
+    cli.main(["collect", "timeline"])
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("2026-09-29, ")
+    assert out[2].split()[0] == "10:00-11:00"
+    cli.main(["collect", "timeline", "--date", "2026-09-28"])
+    assert capsys.readouterr().out.strip() == phrases.pick("collect.timeline.empty").format(date="2026-09-28")
+
+
+def test_timeline_on_a_past_day_runs_an_open_interval_to_midnight(cfg):
+    _morning_ledger()
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(30, 9, 0))
+    assert lines[2].split() == ["10:00-24:00", "away", "observed", "eventlog", "14h", "00m", "open"]
+
+
+def test_timeline_counts_malformed_lines_on_stderr(cfg):
+    _morning_ledger()
+    with store.shard_path(paths.current_host()).open("ab") as handle:
+        handle.write(b"not json\n")
+    lines, errors = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))
+    assert len(lines) == 3
+    assert errors == [phrases.pick("collect.timeline.malformed").format(count=1)]
+
+
+def test_timeline_folds_a_short_uncovered_gap_with_the_configured_micro_max(cfg, monkeypatch):
+    """The item carried since 6b: the diagnostic replays with `absence.micro_max`, as the viewer's start does."""
+    seen: list[object] = []
+    real_replay = cli.replay
+
+    def recording_replay(events, **kwargs):
+        seen.append(kwargs.get("micro_max"))
+        return real_replay(events, **kwargs)
+
+    monkeypatch.setattr(cli, "replay", recording_replay)
+    store.append(_ledger_event(_utc(29, 6, 0), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 6, 0), "unlock", Source.EVENTLOG))
+    store.append(_unclean_stop(_utc(29, 6, 30)))
+    store.append(_ledger_event(_utc(29, 6, 35), "collector_start", reason="launch"))  # five minutes later
+    store.append(_ledger_event(_utc(29, 6, 35), "unlock", Source.PROBE))
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))
+    assert seen == [cfg.absence.micro_max]
+    kinds = [line.split()[1] for line in lines[1:]]
+    assert "downtime" not in kinds
+    # The fold carries presence through the gap, inferred; the restart then opens its own run, observed.
+    assert lines[2].split()[:3] == ["08:30-08:35", "present", "inferred"]
+    assert lines[3].split()[:4] == ["08:35-11:00", "present", "observed", "collector"]
+
+
+def test_timeline_leaves_a_long_uncovered_gap_as_downtime(cfg):
+    store.append(_ledger_event(_utc(29, 6, 0), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 6, 0), "unlock", Source.EVENTLOG))
+    store.append(_unclean_stop(_utc(29, 6, 30)))
+    store.append(_ledger_event(_utc(29, 6, 45), "collector_start", reason="launch"))  # fifteen minutes later
+    store.append(_ledger_event(_utc(29, 6, 45), "unlock", Source.PROBE))
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))
+    assert lines[2].split()[:3] == ["08:30-08:45", "downtime", "inferred"]
+
+
+def test_timeline_events_lists_the_days_events_below_the_rows(cfg):
+    _morning_ledger()
+    store.append(_ledger_event(_utc(28, 20, 0), "lock", Source.EVENTLOG))  # yesterday: not listed
+    lines, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0), events=True)
+    assert lines[3] == phrases.pick("collect.timeline.events")
+    assert [line.split()[:2] for line in lines[4:]] == [
+        ["08:00:00", "collector_start"],
+        ["08:00:00", "unlock"],
+        ["10:00:00", "lock"],
+    ]
+    assert lines[6].split() == ["10:00:00", "lock", "eventlog", "observed"]
+    assert lines[4].split()[-1] == "launch"
+    plain, _ = _timeline_lines(cfg, date(2026, 9, 29), _utc(29, 9, 0))
+    assert len(plain) == 3
+
+
+def test_timeline_parses_its_options_and_rejects_a_malformed_date():
+    parser = cli.build_parser()
+    args = parser.parse_args(["collect", "timeline"])
+    assert (args.collect_command, args.date, args.events) == ("timeline", None, False)
+    args = parser.parse_args(["collect", "timeline", "--date", "2026-10-16", "--events"])
+    assert (args.date, args.events) == (date(2026, 10, 16), True)
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(["collect", "timeline", "--date", "2026-13-01"])
+    assert raised.value.code == 2
+
+
+def test_timeline_writes_nothing(capsys):
+    _morning_ledger()
+    shard = store.shard_path(paths.current_host())
+    before = shard.read_bytes()
+    cli.main(["collect", "timeline", "--date", "2026-09-29", "--events"])
+    assert "present" in capsys.readouterr().out
+    assert shard.read_bytes() == before
+    assert not paths.lock_file("collector").exists()
+    assert not paths.checkpoint_file(paths.current_host()).exists()
+    assert sorted(path.name for path in paths.ledger_dir().iterdir()) == [shard.name]
+
+
+def test_collect_status_prints_the_derived_state_after_the_pid_line(capsys):
+    _morning_ledger()
+    lock = lockfile.acquire("collector")
+    cli.main(["collect", "status"])
+    out = capsys.readouterr().out.splitlines()
+    assert str(lock.status.pid) in out[0]
+    assert out[1] == phrases.pick("app.collector.state.away").format(since="10:00")
+    assert len(out) == 2
+
+
+def test_collect_status_without_an_open_interval_prints_only_the_pid_line(capsys):
+    lock = lockfile.acquire("collector")
+    cli.main(["collect", "status"])
+    out = capsys.readouterr().out.splitlines()
+    assert str(lock.status.pid) in out[0]
+    assert len(out) == 1
+
+
+def test_collector_state_reads_the_open_interval_while_a_collector_runs(cfg):
+    _morning_ledger()
+    lockfile.acquire("collector")
+    assert cli._LedgerState(cfg)() == CollectorState(
+        running=True, kind=IntervalType.AWAY, since=_utc(29, 8, 0)
+    )
+
+
+def test_collector_state_without_a_collector_is_not_observing_since_the_checkpoint(cfg):
+    _morning_ledger()
+    host = paths.current_host()
+    last_tick = _utc(29, 8, 30)
+    paths.checkpoint_file(host).write_text(
+        json.dumps({"ts": last_tick.isoformat(), "pid": 1}), encoding="utf-8"
+    )
+    assert cli._LedgerState(cfg)() == CollectorState(running=False, kind=None, since=last_tick)
+    paths.checkpoint_file(host).write_text("not json", encoding="utf-8")
+    assert cli._LedgerState(cfg)() == CollectorState(running=False, kind=None, since=None)
+
+
+def test_collector_state_replays_the_shard_only_when_it_changes(cfg, monkeypatch):
+    replays: list[str] = []
+    real = cli._replay_shard
+
+    def counting(host, cfg_):
+        replays.append(host)
+        return real(host, cfg_)
+
+    monkeypatch.setattr(cli, "_replay_shard", counting)
+    _morning_ledger()
+    lockfile.acquire("collector")
+    state = cli._LedgerState(cfg)
+    assert state().kind is IntervalType.AWAY
+    assert state().kind is IntervalType.AWAY
+    assert len(replays) == 1
+    store.append(_ledger_event(_utc(29, 8, 30), "unlock", Source.EVENTLOG))
+    assert state() == CollectorState(running=True, kind=IntervalType.PRESENT, since=_utc(29, 8, 30))
+    assert len(replays) == 2

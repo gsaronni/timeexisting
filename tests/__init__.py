@@ -1,0 +1,1 @@
+"""Marks the test suite as a package, so pytest puts the repository root rather than this directory on `sys.path` when it imports a test module. `tests.timeline_helpers` then resolves the same way from any working directory and on every runner."""

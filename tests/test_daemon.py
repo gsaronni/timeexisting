@@ -4,6 +4,7 @@ import os
 import signal
 import threading
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -725,7 +726,7 @@ def test_startup_probe_without_a_usable_logon_time_writes_an_inferred_probe_unlo
     assert _session_lines() == [("unlock", "probe", _T0, "inferred", {})]
 
 
-def test_startup_probe_on_a_locked_session_writes_nothing_and_records_the_state(cfg):
+def test_startup_probe_on_a_locked_session_writes_an_inferred_probe_lock_and_records_the_state(cfg):
     clock = _ManualClock(_T0)
     seen: list[SessionState | None] = []
 
@@ -734,8 +735,26 @@ def test_startup_probe_on_a_locked_session_writes_nothing_and_records_the_state(
         clock.sleep(seconds)
 
     daemon.run_collector(clock, sleep, cfg, max_ticks=1, session=_FakeSession([_LOCKED], _T0))
-    assert _session_lines() == []
+    assert _session_lines() == [("lock", "probe", _T0, "inferred", {})]
     assert seen == [_LOCKED]
+
+
+def test_startup_probe_tells_the_tracker_of_the_lock_it_writes_through_heard(cfg):
+    heard: list[tuple[datetime, EventType, Source]] = []
+    recorder = lambda ts, event, source: heard.append((ts, event, source))  # noqa: E731
+    tz = ZoneInfo(cfg.display.timezone)
+    state = daemon.startup_probe(_FakeSession([_LOCKED], _T0), _T0, tz, _host(), "work", None, heard=recorder)
+    assert state is _LOCKED
+    assert heard == [(_T0, EventType.LOCK, Source.PROBE)]
+    # The unlock goes through the same path; an unknown state tells it nothing.
+    heard.clear()
+    daemon.startup_probe(
+        _FakeSession([_UNLOCKED], _T0 - timedelta(days=3)), _T0, tz, _host(), "work", None, heard=recorder
+    )
+    assert heard == [(_T0, EventType.UNLOCK, Source.PROBE)]
+    heard.clear()
+    daemon.startup_probe(_FakeSession([None]), _T0, tz, _host(), "work", None, heard=recorder)
+    assert heard == []
 
 
 def test_startup_probe_with_an_unknown_state_writes_nothing_and_records_none(cfg):
@@ -782,7 +801,11 @@ def test_two_consecutive_disagreeing_ticks_write_the_missing_lock_at_the_first(c
 def test_two_consecutive_disagreeing_ticks_write_the_missing_unlock(cfg):
     session = _FakeSession([_LOCKED, _UNLOCKED, _UNLOCKED])
     _run(cfg, _ManualClock(_T0), max_ticks=3, session=session)
-    assert _session_lines() == [("unlock", "probe", _tick(cfg, 1), "inferred", {})]
+    # The startup probe's lock first (step 9b), then the unlock at the first of the two disagreeing ticks.
+    assert _session_lines() == [
+        ("lock", "probe", _T0, "inferred", {}),
+        ("unlock", "probe", _tick(cfg, 1), "inferred", {}),
+    ]
 
 
 def test_disagreements_that_are_not_consecutive_write_nothing(cfg):

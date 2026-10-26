@@ -807,9 +807,9 @@ def test_timeline_folds_a_short_uncovered_gap_with_the_configured_micro_max(cfg,
     assert seen == [cfg.absence.micro_max]
     kinds = [line.split()[1] for line in lines[1:]]
     assert "downtime" not in kinds
-    # The fold carries presence through the gap, inferred; the restart then opens its own run, observed.
-    assert lines[2].split()[:3] == ["08:30-08:35", "present", "inferred"]
-    assert lines[3].split()[:4] == ["08:35-11:00", "present", "observed", "collector"]
+    # The fold carries presence through the gap, inferred, and the restart's session rests on it: one inferred interval.
+    assert lines[2].split()[:4] == ["08:30-11:00", "present", "inferred", "collector"]
+    assert len(lines) == 3
 
 
 def test_timeline_leaves_a_long_uncovered_gap_as_downtime(cfg):

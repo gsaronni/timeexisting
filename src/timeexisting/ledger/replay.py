@@ -27,7 +27,7 @@ class IntervalType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Interval:
-    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when the opening boundary was inferred, the closing one was an inferred transition rather than a stop, or the interval lies inside a gap replay reconstructed or folded; `source` is the opening boundary's. A boundary from a clock jump is observed on its awake side: a clock suspend closing an interval, or a clock resume opening one, does not make it inferred."""
+    """One interval of the typed timeline on `host`. `end` is `None` while it is still open. `confidence` is `inferred` when the opening boundary was inferred, the closing one was an inferred transition rather than a stop, the interval lies inside a gap replay reconstructed or folded, the session fact it rests on came from a probe or a fold, or it is the tick before a probe boundary; `source` is the opening boundary's. A boundary from a clock jump is observed on its awake side: a clock suspend closing an interval, or a clock resume opening one, does not make it inferred."""
 
     kind: IntervalType
     start: datetime
@@ -155,6 +155,8 @@ class _Step(Enum):
     STOP = auto()
     # A stop whose gap is reconstructed from the event logs, or folded: the state before it carries through.
     CARRY = auto()
+    # A stop whose uncovered gap is shorter than `micro_max`: the state carries through unverified by any log, so a known session fact handed to the next run is inferred until an observed transition replaces it.
+    FOLD = auto()
     # A stop whose gap the logs do not cover but which holds the collector's `boot_time()` line: the machine was off up to it.
     SHUTDOWN = auto()
     # Boot records inside a reconstructed gap, and the collector's `boot_time()` line.
@@ -183,7 +185,7 @@ _BOOT_STEPS = {str(BootKind.START): _Step.BOOT_START, str(BootKind.STOP): _Step.
 # The records a reconstructed gap is read from.
 _RECORD_EVENTS = {*_SESSION_EVENTS, *_MACHINE_EVENTS, EventType.INPUT, EventType.BOOT}
 # A boundary where the collector stopped observing. It says nothing about the user, so an interval it closes keeps the confidence its other edge gives it.
-_STOP_STEPS = {_Step.STOP, _Step.CARRY, _Step.SHUTDOWN}
+_STOP_STEPS = {_Step.STOP, _Step.CARRY, _Step.FOLD, _Step.SHUTDOWN}
 # A boundary from a clock jump sits on a tick the collector observed with the machine awake: it is observed on that side and inferred on the sleeping side. The suspend is the last tick before the jump, so it does not make the interval it closes inferred; the wake, a `resume` or a phase 2 `resumed` start, is the first tick after it, so it does not make the interval it opens inferred. The asleep interval between them stays inferred.
 _WAKE_STEPS = {_Step.RESUME, _Step.START}
 # Phase 2 wrote a clock jump as a stop and start pair with these reasons (`StopReason.SUSPENDED`, `StartReason.RESUMED` in the collector); replay reads them as an inferred suspend and resume.
@@ -208,15 +210,16 @@ class _Boundary:
 
 @dataclass(slots=True)
 class _State:
-    """The three facts of the presence model (machine, session, observation) plus whether presence is evidenced. `reconstructing` is true inside a gap replay reconstructs or folds: the collector is not observing, but the state carries through and is not downtime."""
+    """The three facts of the presence model (machine, session, observation) plus whether presence is evidenced. `reconstructing` is true inside a gap replay reconstructs or folds: the collector is not observing, but the state carries through and is not downtime. `session_inferred` is true while the session fact rests on an inference, a probe transition or a fold that carried a known session through an unobserved stretch; an observed transition, a stop or a boot start clears it."""
 
     observing: bool = False
     reconstructing: bool = False
     machine: _Machine = _Machine.UNKNOWN
     session: _Session = _Session.UNKNOWN
     evidenced: bool = False
+    session_inferred: bool = False
 
-    def apply(self, step: _Step) -> None:
+    def apply(self, step: _Step, confidence: Confidence = Confidence.OBSERVED) -> None:
         match step:
             case _Step.START:
                 self.observing = True
@@ -229,6 +232,12 @@ class _State:
                 self.machine = _Machine.UNKNOWN
                 self.session = _Session.UNKNOWN
                 self.evidenced = False
+                self.session_inferred = False
+            case _Step.FOLD:
+                self.observing = False
+                self.reconstructing = True
+                # An unknown session carries nothing to infer; a known one is now unverified.
+                self.session_inferred = self.session is not _Session.UNKNOWN
             case _Step.CARRY:
                 self.observing = False
                 self.reconstructing = True
@@ -246,12 +255,15 @@ class _State:
                 self.machine = _Machine.AWAKE
                 self.session = _Session.LOCKED
                 self.evidenced = False
+                self.session_inferred = False
             case _Step.LOCK:
                 self.session = _Session.LOCKED
                 self.evidenced = False
+                self.session_inferred = confidence is Confidence.INFERRED
             case _Step.UNLOCK:
                 self.session = _Session.UNLOCKED
                 self.evidenced = True
+                self.session_inferred = confidence is Confidence.INFERRED
             case _Step.SUSPEND:
                 self.machine = _Machine.ASLEEP
                 self.evidenced = False
@@ -374,7 +386,7 @@ def _gap_steps(
     if booted:
         return {stop.id: (_Step.SHUTDOWN,), booted[-1].id: (_Step.BOOT_START,)}
     if start.ts - stop.ts < micro_max:
-        return {stop.id: (_Step.CARRY,)}
+        return {stop.id: (_Step.FOLD,)}
     return {}
 
 
@@ -447,34 +459,79 @@ def _inferred_close(boundary: _Boundary | None) -> bool:
     )
 
 
-def _intervals(host: str, events: Sequence[Event], micro_max: timedelta) -> list[Interval]:
-    """The typed timeline of one host, from its first `collector_start` on. Events before it only set the state that start inherits. A span opened inside a reconstructed or folded gap is `inferred` whatever its boundaries say, so the gap's edges split an interval of the same type. A stop that closes an interval does not make it `inferred`: presence observed up to an unclean stop stays observed."""
+_SESSION_KINDS = {IntervalType.PRESENT, IntervalType.AWAY, IntervalType.UNEVIDENCED}
+_PROBE_STEPS = {_Step.LOCK, _Step.UNLOCK}
+
+
+@dataclass(slots=True)
+class _Span:
+    """One stretch of a single interval type. `inferred` is set for a span inside a reconstructed or folded gap, on an inferred session fact, or in the tick before a probe boundary. `probe_tick` marks a span whose uncertain last tick the probe rule already handled, so the probe boundary closing it does not make it inferred again, and so the next boundary always ends it."""
+
+    kind: IntervalType
+    inferred: bool
+    start: datetime
+    opened: _Boundary
+    end: datetime | None = None
+    closed: _Boundary | None = None
+    probe_tick: bool = False
+
+
+def _probe_transition(boundary: _Boundary) -> bool:
+    return boundary.source is Source.PROBE and boundary.step in _PROBE_STEPS
+
+
+def _intervals(host: str, events: Sequence[Event], micro_max: timedelta, tick: timedelta) -> list[Interval]:
+    """The typed timeline of one host, from its first `collector_start` on. Events before it only set the state that start inherits.
+
+    A span opened inside a reconstructed or folded gap is `inferred` whatever its boundaries say, so the gap's edges split an interval of the same type. So is a present, away or unevidenced span whose session fact rests on an inference, a probe transition or a fold, until an observed transition replaces the fact: a start carries no confidence into a session it did not observe. A stop that closes an interval does not make it `inferred`: presence observed up to an unclean stop stays observed.
+
+    A probe transition is written at the first of two disagreeing ticks, so the real change lies in the tick before it. With `tick` given, that tick is split off the present, away or unevidenced interval the probe closes as `inferred`, and the rest keeps its confidence; a probe boundary within a tick of the interval's start makes the whole interval `inferred`. Without `tick` the whole interval is `inferred`. The startup probe at a run's own start splits nothing, since nothing before the start was this run's to observe."""
     state = _State()
-    spans: list[tuple[IntervalType, bool, _Boundary, _Boundary | None]] = []
+    spans: list[_Span] = []
     for boundary in _boundaries(_deduplicated(events), micro_max):
-        state.apply(boundary.step)
+        if (
+            spans
+            and tick > timedelta()
+            and state.observing
+            and _probe_transition(boundary)
+            and spans[-1].kind in _SESSION_KINDS
+            and spans[-1].start < boundary.ts
+        ):
+            last = spans[-1]
+            split = max(boundary.ts - tick, last.start)
+            if split == last.start:
+                last.inferred = True
+                last.probe_tick = True
+            else:
+                last.end = split
+                spans.append(_Span(last.kind, True, split, last.opened, probe_tick=True))
+        state.apply(boundary.step, boundary.confidence)
         if not spans and boundary.step is not _Step.START:
             continue
         kind = state.interval_type()
-        if spans and spans[-1][0] is kind and spans[-1][1] == state.reconstructing:
+        inferred = state.reconstructing or (state.session_inferred and kind in _SESSION_KINDS)
+        if spans and spans[-1].kind is kind and spans[-1].inferred == inferred and not spans[-1].probe_tick:
             continue
         if spans:
-            previous_kind, previous_reconstructed, opened, _ = spans[-1]
-            spans[-1] = (previous_kind, previous_reconstructed, opened, boundary)
-        spans.append((kind, state.reconstructing, boundary, None))
+            spans[-1].end = boundary.ts
+            spans[-1].closed = boundary
+        spans.append(_Span(kind, inferred, boundary.ts, boundary))
 
     intervals: list[Interval] = []
-    for kind, reconstructed, opened, closed in spans:
-        end = None if closed is None else closed.ts
-        if end == opened.ts:
+    for span in spans:
+        if span.end == span.start:
             continue
-        inferred = reconstructed or _inferred_open(opened) or _inferred_close(closed)
+        inferred = (
+            span.inferred
+            or _inferred_open(span.opened)
+            or (not span.probe_tick and _inferred_close(span.closed))
+        )
         confidence = Confidence.INFERRED if inferred else Confidence.OBSERVED
         previous = intervals[-1] if intervals else None
-        if previous is not None and previous.kind is kind and previous.confidence is confidence:
-            intervals[-1] = Interval(kind, previous.start, end, host, confidence, previous.source)
+        if previous is not None and previous.kind is span.kind and previous.confidence is confidence:
+            intervals[-1] = Interval(span.kind, previous.start, span.end, host, confidence, previous.source)
         else:
-            intervals.append(Interval(kind, opened.ts, end, host, confidence, opened.source))
+            intervals.append(Interval(span.kind, span.start, span.end, host, confidence, span.opened.source))
     return intervals
 
 
@@ -506,14 +563,18 @@ def _inferred(event: Event) -> bool:
     return event.confidence is Confidence.INFERRED
 
 
-def replay(events: Iterable[Event], *, micro_max: timedelta = timedelta()) -> Timeline:
+def replay(
+    events: Iterable[Event], *, micro_max: timedelta = timedelta(), tick: timedelta = timedelta()
+) -> Timeline:
     """Derive the typed timeline (roadmap section 6) and the collector's runs. Input order is not trusted: events are sorted by `events.order_key` first, `(ts, tie_rank, id)`, which puts an `input` after the `resume` it shares a time with and a `lock` after an `unlock` or `input` at the same time.
 
     Typed intervals: present means awake, unlocked and evidenced. `unlock`, and `input` while awake on an unlocked session, open presence; `lock`, `suspend` and a `collector_stop` close it. Collector liveness with no session event is `unevidenced`, never `present`. Live and inferred session and machine transitions take their `eventlog` partner's time, never across a `collector_stop`; repeated `eventlog` records count once. A phase 2 `suspended` stop with its `resumed` start reads as an inferred suspend and resume.
 
     A clock jump's boundaries sit on collector ticks, the last before the jump and the first after it, so they are observed on the awake side and inferred on the sleeping side: the interval a clock suspend closes and the one a clock resume opens keep the confidence their other edge gives them, and the asleep interval between them is `inferred`. A phase 2 `suspended` and `resumed` pair is read the same way. An `eventlog` partner still moves the boundary to the logged time.
 
-    Gaps between runs (roadmap section 8): a gap after a deliberate stop is `downtime`, and an `unlock` inside it opens presence only from the next start. A gap a coverage note says both logs cover is reconstructed: the state before it carries through, the records inside it apply, a shutdown record makes it `off` and a start record `away` until an unlock, and every interval inside is `inferred`. Its only `downtime` is before a start record no shutdown record precedes, from the last record before that start. An uncovered gap holding the collector's `boot_time()` line is `off` up to it and `away` from it until an unlock, `inferred`. Any other uncovered gap shorter than `micro_max` is folded: the state carries through, `inferred`. Anything else is `downtime`. `micro_max` is `absence.micro_max`; the default folds nothing.
+    A probe transition sits on the first of two disagreeing ticks, so the real change lies in the tick before it: with `tick`, `collector.tick`, that tick is split off the interval the probe closes as `inferred` and the rest keeps its confidence; without it the whole interval is `inferred`. A session fact that rests on an inference, a probe transition or a fold, keeps the present, away or unevidenced intervals built on it `inferred` across starts and sleeps until an observed transition replaces it.
+
+    Gaps between runs (roadmap section 8): a gap after a deliberate stop is `downtime`, and an `unlock` inside it opens presence only from the next start. A gap a coverage note says both logs cover is reconstructed: the state before it carries through, the records inside it apply, a shutdown record makes it `off` and a start record `away` until an unlock, and every interval inside is `inferred`. Its only `downtime` is before a start record no shutdown record precedes, from the last record before that start. An uncovered gap holding the collector's `boot_time()` line is `off` up to it and `away` from it until an unlock, `inferred`. Any other uncovered gap shorter than `micro_max` is folded: the state carries through, `inferred`, and a known session carried through stays `inferred` after the restart. Anything else is `downtime`. `micro_max` is `absence.micro_max`; the default folds nothing.
 
     Collector runs: each host's `collector_start` pairs with its next `collector_stop`, and that stop with the next start. A start followed by another start leaves the first interval unclosed (`end=None`) and produces no gap, since where it ended is unknown. A stop with no open interval produces nothing. Events of any other type are kept and ignored for pairing.
     """
@@ -556,7 +617,7 @@ def replay(events: Iterable[Event], *, micro_max: timedelta = timedelta()) -> Ti
     intervals = [
         interval
         for host, host_events in by_host.items()
-        for interval in _intervals(host, host_events, micro_max)
+        for interval in _intervals(host, host_events, micro_max, tick)
     ]
     return Timeline(
         events=ordered,

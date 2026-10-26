@@ -238,12 +238,12 @@ def _in_night_window(moment: time, cfg: Config) -> bool:
 
 
 def _replay_shard(host: str, cfg: Config) -> Timeline | None:
-    """This host's shard replayed with `absence.micro_max`, the one replay every reader in the viewer shares, or `None` when the shard cannot be read."""
+    """This host's shard replayed with `absence.micro_max` and `collector.tick`, the one replay every reader in the viewer shares, or `None` when the shard cannot be read."""
     try:
         result = store.read_shard(store.shard_path(host))
     except OSError:
         return None
-    return replay(result.events, micro_max=cfg.absence.micro_max)
+    return replay(result.events, micro_max=cfg.absence.micro_max, tick=cfg.collector.tick)
 
 
 def _ledger_start(
@@ -489,7 +489,7 @@ def _collect_timeline(
     """`te collect timeline` (roadmap section 3): every shard replayed with `absence.micro_max`, and `day`'s intervals per host printed in the configured zone with type, confidence, source and duration. An open interval runs to `now`. With `events`, the day's ledger events follow each host's rows. Malformed lines are counted on stderr. Reads only; writes nothing."""
     zone = ZoneInfo(cfg.display.timezone)
     result = store.read_all()
-    timeline = replay(result.events, micro_max=cfg.absence.micro_max)
+    timeline = replay(result.events, micro_max=cfg.absence.micro_max, tick=cfg.collector.tick)
     _, day_end = day_bounds(day, zone)
     printed = False
     for host in hosts_on(timeline, day, zone):

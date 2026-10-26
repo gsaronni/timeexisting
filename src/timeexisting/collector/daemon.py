@@ -8,7 +8,7 @@ Single writer (roadmap section 3). The session watcher's window thread never app
 
 Event log reconciliation (roadmap section 8, `collector/reconcile.py`). Every tick reads the System log and Winlogon/Operational behind a cursor each and appends what they record. A clock jump is held as a pending gap until the System log resolves it, or written from the clock after two minutes. At start, a gap since the previous run that did not end deliberately gets a `coverage` note, and its records come in with the first read, because the cursors start at the gap's start; a deliberate stop's gap gets neither.
 
-Session state (roadmap section 6). At start the session probe records the current state and writes the `unlock` that opens the run's presence when the session is unlocked. Each tick it is read again and compared with the last known state, which the checkpoint holds; a disagreement that persists for two consecutive ticks writes the missing transition, source `probe`, `inferred`.
+Session state (roadmap section 6). At start the session probe records the current state and writes the `unlock` that opens the run's presence when the session is unlocked, or an inferred `lock` when it is locked. Each tick it is read again and compared with the last known state, which the checkpoint holds; a disagreement that persists for two consecutive ticks writes the missing transition, source `probe`, `inferred`.
 
 Input evidence (roadmap section 6, phase 3 step 7). The `Evidence` tracker hears every transition the run writes, seeded from the end of this host's ledger. The reconciler writes `input` from a 507 wake reason. Last in each tick, and only while the tracker says awake, unlocked and unevidenced, the input probe is read once; an input strictly after the start of that stretch and strictly newer than the last `win32` input becomes `input`, source `win32`, `observed`, at its own time. One such input evidences the stretch, so the probe is not read again until the next resume.
 
@@ -282,14 +282,19 @@ def startup_probe(
     *,
     heard: Callable[[datetime, EventType, Source], object] | None = None,
 ) -> SessionState | None:
-    """Record the session state at collector start (roadmap section 6) and return it. Unlocked, with a logon time on the local day of `ts` in `tz` and later than `last_event`: `unlock` source `logon` at the logon time, `observed`. Unlocked otherwise: `unlock` source `probe` at `ts`, `inferred`. Locked or unknown: nothing is written.
+    """Record the session state at collector start (roadmap section 6) and return it. Unlocked, with a logon time on the local day of `ts` in `tz` and later than `last_event`: `unlock` source `logon` at the logon time, `observed`. Unlocked otherwise: `unlock` source `probe` at `ts`, `inferred`. Locked: `lock` source `probe` at `ts`, `inferred`, so a state replay carried through a folded gap cannot outlive a session that was locked when the run began. Unknown: nothing is written.
 
-    `heard`, when given, is told of the `unlock` written.
+    `heard`, when given, is told of the transition written.
 
     `last_event` is the time of this host's last ledger event before this run started: the previous run's stop, or the stop recovered at its checkpoint as unclean. A logon at or before it belongs to a session an earlier run already covered; an unlock stamped there would sort before that stop, which closes it in replay, so the run would open unevidenced.
     """
     state = session.state()
     logger.info("startup probe: session %s", state or "unknown")
+    if state is SessionState.LOCKED:
+        _append(ts, host, profile, EventType.LOCK, Source.PROBE, Confidence.INFERRED)
+        if heard is not None:
+            heard(ts, EventType.LOCK, Source.PROBE)
+        return state
     if state is not SessionState.UNLOCKED:
         return state
     logon = session.logon_time()

@@ -115,9 +115,21 @@ def test_start_flag_parses_hh_mm():
     assert args.start == time(8, 30)
 
 
+def test_short_start_parses_like_the_long_form():
+    short = cli.build_parser().parse_args(["-s", "08:00"])
+    long = cli.build_parser().parse_args(["--start", "08:00"])
+    assert short.start == time(8, 0)
+    assert short.start == long.start
+
+
 def test_start_flag_rejects_a_malformed_value():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["--start", "not-a-time"])
+
+
+def test_short_start_rejects_a_malformed_value_like_the_long_form():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["-s", "not-a-time"])
 
 
 def test_flag_option_accepts_every_documented_name_and_may_repeat():
@@ -125,6 +137,15 @@ def test_flag_option_accepts_every_documented_name_and_may_repeat():
         ["--flag", "no-lunch", "--flag", "half-day", "--flag", "sick", "--flag", "offsite"]
     )
     assert args.flags == [DayFlag.NO_LUNCH, DayFlag.HALF_DAY, DayFlag.SICK, DayFlag.OFFSITE]
+
+
+def test_short_flag_parses_like_the_long_form_including_the_repeat():
+    parser = cli.build_parser()
+    assert parser.parse_args(["-f", "sick"]).flags == [DayFlag.SICK]
+    assert parser.parse_args(["-f", "sick"]).flags == parser.parse_args(["--flag", "sick"]).flags
+    repeated = parser.parse_args(["-f", "sick", "-f", "no-lunch"]).flags
+    assert repeated == [DayFlag.SICK, DayFlag.NO_LUNCH]
+    assert repeated == parser.parse_args(["--flag", "sick", "--flag", "no-lunch"]).flags
 
 
 def test_flag_option_rejects_an_unknown_name():
@@ -200,6 +221,16 @@ def test_resolve_start_uses_cli_start_without_prompting_and_records_it(cfg):
     )
     assert start == DayStart(time(8, 30), Provenance.FLAG)
     assert recorded == [(time(8, 30), "flag")]
+
+
+def test_resolve_start_records_the_short_start_as_a_flag_start_too(cfg):
+    args = cli.build_parser().parse_args(["-s", "08:00"])
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args, cfg, _at(10, 0), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(time(8, 0), Provenance.FLAG)
+    assert recorded == [(time(8, 0), "flag")]
 
 
 def test_resolve_start_skips_the_prompt_on_a_weekend(cfg):

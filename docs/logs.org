@@ -28,6 +28,17 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-10-26, short aliases =-s= and =-f=
+
+*Asked:* on =feat/short-flags=, outside the phase 3 steps: short aliases =-s= for =--start= and =-f= for =--flag= in the viewer's options, same dest, type, help and behaviour, the long forms kept; check first that neither letter is used elsewhere; tests beside their long-form controls; the README; this entry.
+
+*Done:*
+- Check: no option in =cli.py= had a single-letter form before this, only argparse's own =-h=; the subcommands are =config= and =collect= with word subcommands. Both letters were free.
+- =cli.py= =build_parser=: =-s= added before =--start= and =-f= before =--flag=. argparse keeps the dest from the first long option, so =args.start= and =args.flags= are unchanged, as are type, metavar and help.
+- =tests/test_cli.py= (4, each beside its control): =-s 08:00= parses to the same =time= as =--start 08:00=; =-s not-a-time= exits like =--start not-a-time=; =-f sick= and =-f sick -f no-lunch= parse to the same lists as their =--flag= forms; =_resolve_start= on =-s 08:00= gives =DayStart(08:00, flag)= and records =(08:00, "flag")= like the long form.
+- README usage table: the two rows show both forms.
+- 1212 tests, up from 1208; =ruff format --check .= and =ruff check .= clean.
+
 ** 2026-10-23, phase 3 step 8: day start
 
 *Asked:* step 8 of =docs/phase-3-prompt.md=, on =phase-3/step-8-day-start=: read first and report, before any plan, the regression in =cli._first_presence_today= as a failing test, what the spec says =day_start= is, and what in the spec contradicts the code since steps 7 and 7b; then a plan; then, with the decisions below, the start resolution of roadmap section 4 replacing the post-tag start default, the =day_start= record, provenance in the viewer, tests with controls.

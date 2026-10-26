@@ -153,12 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not start a collector if none is running. Implied by --at and --demo.",
     )
     parser.add_argument(
+        "-s",
         "--start",
         type=_start_type,
         metavar="HH:MM",
         help="Set the day's start time, skipping the interactive prompt.",
     )
     parser.add_argument(
+        "-f",
         "--flag",
         dest="flags",
         action="append",

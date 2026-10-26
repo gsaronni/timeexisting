@@ -7,6 +7,12 @@ def test_grimdark_palette_loads_every_role():
     assert theme.danger == "bold red"
 
 
+def test_grimdark_palette_sets_every_derived_state_role():
+    theme = load_theme()
+    assert set(theme.state) == {"present", "away", "asleep", "unevidenced"}
+    assert theme.state["present"] == "green"
+
+
 def test_weekday_colors_keyed_monday_zero_through_sunday_six():
     theme = load_theme()
     assert set(theme.weekday) == set(range(7))

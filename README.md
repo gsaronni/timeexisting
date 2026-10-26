@@ -99,8 +99,9 @@ te --help
 | `te --demo` | Cycle through fixed moments: every phase of the day, both weekend days, every month. Starts no collector. |
 | `te --no-collector` | Open the dashboard without starting a collector. |
 | `te collect` | Run the collector in the foreground. Ctrl+C stops it cleanly. |
-| `te collect status` | Report the running collector's pid, host and start time, or that none is running. |
+| `te collect status` | Report the running collector's pid, host and start time, then the derived state of this host's ledger and since when, or that none is running. |
 | `te collect stop` | Ask the running collector to stop and wait for it. |
+| `te collect timeline --date 2026-10-16` | Print the day's typed intervals from the ledger in local time: type, confidence, source and duration. Today when `--date` is omitted. `--events` lists the day's ledger events below them. Read-only; needs no collector. |
 | `te config path` | Print where the config file is read from. |
 | `te config init` | Write the packaged defaults there, if no file exists yet. |
 | `te config check` | Load and validate the config. |

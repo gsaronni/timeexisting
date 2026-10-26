@@ -96,7 +96,7 @@ The dashboard is not open all day. The collector must survive the terminal closi
 
 =te= (viewer), =te collect=, =te collect status=, =te collect stop=, =te collect timeline=, =te config=, =te stats=, =te edit=, =te day=, =te demo=, =te content lint=.
 
-=te collect timeline [--date YYYY-MM-DD]= is a read-only diagnostic: it replays the ledger and prints the day's typed intervals (section 6) in local time with type, confidence, source and duration, as plain text with no Rich live surface. It writes nothing and needs no running collector.
+=te collect timeline [--date YYYY-MM-DD] [--events]= is a read-only diagnostic: it replays the ledger and prints the day's typed intervals (section 6) in local time with type, confidence, source and duration, as plain text with no Rich live surface. With =--events= it also lists the day's ledger events below the intervals, so a lock during a sleep or an input after a wake, which change no interval, can still be checked against the log. It writes nothing and needs no running collector. The day's bounds are built in the configured zone, so a DST day is 23 or 25 hours long.
 
 ** Purity rule
 
@@ -297,6 +297,8 @@ Replay emits non-overlapping intervals:
 Every interval carries =confidence= (=observed= or =inferred=) from its boundary events, except that a =collector_stop= closing an interval never makes it =inferred= (section 8), and neither does a boundary from a clock jump on its awake side: the =clock= =suspend= sits on the last tick before the jump and does not make the interval it closes =inferred=, the =clock= =resume= sits on the first tick after it and does not make the interval it opens =inferred=, and the =asleep= interval between them is =inferred=. A phase 2 =suspended= and =resumed= pair is read the same way. An =eventlog= partner still moves the boundary to the logged time. An interval inside a reconstructed or folded gap is =inferred=. Adjacent intervals of the same type and confidence merge. Zero-length intervals are dropped. Intervals are stored and derived in UTC and split at local midnight only for day views, never in storage. A DST change (25 October 2026) moves no stored timestamp.
 
 Legacy days. Phase 2 shards carry no lock, unlock, suspend or resume events and replay reads them without error. A legacy =collector_stop= with reason =suspended= followed by =collector_start= with reason =resumed= is read as an inferred =suspend= and =resume=. Legacy collector liveness with no session events becomes =unevidenced=, never =present=.
+
+The current derived state. The viewer's footer and =te collect status= show this host's open interval, its type and since when, read from the ledger. The line trails the live session by up to one collector tick plus the event log lag: a lock is written when the collector hears it, and a sleep boundary when the System log read returns it. A collector that does not hold its lock shows as not observing, since its last checkpoint tick when one exists.
 
 ** Timestamp authority
 

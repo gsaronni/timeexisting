@@ -13,6 +13,14 @@ DEFAULT_PALETTE = "grimdark"
 
 _PALETTES_DIR = "content/palettes"
 
+# The footer's derived-state roles (roadmap section 6), keyed by interval type; a palette may override any of them.
+_STATE_DEFAULTS = {
+    "present": "green",
+    "away": "yellow",
+    "asleep": "blue",
+    "unevidenced": "dark_orange3",
+}
+
 
 @cache
 def _load_palette(name: str) -> dict:
@@ -48,6 +56,7 @@ class Theme:
     weekday: dict[int, str]
     break_type: dict[str, str]
     phase: dict[str, str]
+    state: dict[str, str]
     progress_low: str
     progress_mid: str
     progress_high: str
@@ -93,6 +102,7 @@ def load_theme(name: str = DEFAULT_PALETTE) -> Theme:
         weekday=weekday,
         break_type=dict(data.get("break", {})),
         phase=dict(data.get("phase", {})),
+        state={**_STATE_DEFAULTS, **data.get("state", {})},
         progress_low=progress.get("low", "red"),
         progress_mid=progress.get("mid", "yellow"),
         progress_high=progress.get("high", "green"),

@@ -138,6 +138,7 @@ progress = ["Progress: {percentage}% Complete"]
 remaining = ["Remaining: {hh:02d}:{mm:02d}:{ss:02d}"]
 status = ["Status: {anim} {message}"]
 window = ["Window: {start} → {nominal_end}"]
+window_inferred = ["Window: {start} (inferred) → {nominal_end}"]
 next_segment = ["Next: {label} at {time}"]
 
 [lunch]

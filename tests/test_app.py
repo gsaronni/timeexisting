@@ -33,6 +33,31 @@ def test_update_populates_every_dynamic_region_without_raising(cfg):
     app._update(layout, resolved, cfg, theme)
 
 
+def test_update_marks_an_inferred_start_on_the_day_panel(cfg):
+    theme = load_theme()
+    layout = build_layout(theme)
+    resolved = _resolved(cfg, datetime(2026, 9, 14, 10, 0, tzinfo=app.local_timezone()))
+    app._update(layout, resolved, cfg, theme, start_inferred=True)
+    console = Console(file=StringIO(), width=120, record=True, legacy_windows=False)
+    console.print(layout["main"]["right"].renderable)
+    assert "(inferred)" in console.export_text()
+
+
+def test_run_passes_the_inferred_start_to_the_day_panel(cfg, monkeypatch):
+    seen: list[bool] = []
+
+    def spy(*_positional, start_inferred=False):
+        seen.append(start_inferred)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "_update", spy)
+    clock = FixedClock(datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
+    console = Console(file=StringIO(), force_terminal=True, width=80)
+    app.run(clock, cfg, time(8, 30), frozenset(), console=console, start_inferred=True)
+    app.run(clock, cfg, time(8, 30), frozenset(), console=console)
+    assert seen == [True, False]
+
+
 def test_run_exits_cleanly_on_keyboard_interrupt_without_sleeping_on_exit(cfg, monkeypatch):
     clock = FixedClock(datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
     console = Console(file=StringIO(), force_terminal=True, width=80)

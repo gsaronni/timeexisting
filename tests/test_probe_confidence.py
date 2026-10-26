@@ -5,7 +5,7 @@ Rule A: a probe transition is written at the first of two disagreeing ticks, so 
 
 from datetime import timedelta
 
-from tests.test_presence_model import (
+from tests.timeline_helpers import (
     ASLEEP,
     AWAY,
     DOWNTIME,
@@ -25,7 +25,6 @@ from tests.test_presence_model import (
     unlock,
     user_input,
 )
-
 from timeexisting.ledger.events import Source
 from timeexisting.ledger.replay import replay
 

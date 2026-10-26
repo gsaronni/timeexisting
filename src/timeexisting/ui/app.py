@@ -50,10 +50,12 @@ def _localize(now_utc: datetime) -> datetime:
     return now_utc.astimezone(local_timezone())
 
 
-def _update(layout: Layout, resolved: Resolved, cfg: Config, theme: Theme) -> None:
+def _update(
+    layout: Layout, resolved: Resolved, cfg: Config, theme: Theme, *, start_inferred: bool = False
+) -> None:
     layout["main"]["left"]["year"].update(year.render(resolved.now, theme))
     layout["main"]["left"]["week"].update(week.render(resolved, cfg, theme))
-    layout["main"]["right"].update(day.render(resolved, theme))
+    layout["main"]["right"].update(day.render(resolved, theme, start_inferred=start_inferred))
 
 
 def _collector_line(since: datetime | None, spawn_failed: bool, theme: Theme) -> Text:
@@ -83,8 +85,9 @@ def run(
     console: Console | None = None,
     collector_since: Callable[[], datetime | None] | None = None,
     spawn_failed: bool = False,
+    start_inferred: bool = False,
 ) -> None:
-    """`collector_since` returns the live collector's start time, or `None` when none runs; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock."""
+    """`collector_since` returns the live collector's start time, or `None` when none runs; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock. `start_inferred` says `start` was inferred (roadmap section 4), which the day panel shows."""
     theme = load_theme()
     layout = build_layout(theme)
     console = console or Console()
@@ -109,7 +112,7 @@ def run(
                 now_local = _localize(clock.now())
                 plan = build_day(now_local.date(), start, flags, cfg)
                 resolved = resolve(now_local, plan)
-                _update(layout, resolved, cfg, theme)
+                _update(layout, resolved, cfg, theme, start_inferred=start_inferred)
                 time.sleep(interval)
     except KeyboardInterrupt:
         console.print(pick("app.interrupted"), style=theme.danger)

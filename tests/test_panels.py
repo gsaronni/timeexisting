@@ -125,6 +125,15 @@ def test_day_panel_renders_for_every_moment(case, moments):
     assert _render_to_string(day.render(moments[case], THEME))
 
 
+def test_working_panel_names_an_inferred_start(moments):
+    resolved = moments["working_morning"]
+    plain = _render_to_string(day.render(resolved, THEME))
+    inferred = _render_to_string(day.render(resolved, THEME, start_inferred=True))
+    assert "(inferred)" not in plain
+    assert "(inferred)" in inferred
+    assert resolved.plan.start.strftime("%H:%M") in inferred
+
+
 def test_pre_work_never_shows_negative_countdown(cfg):
     plan = build_day(_MONDAY, time(8, 30), frozenset(), cfg)
     resolved = resolve(plan.start - timedelta(minutes=1), plan)

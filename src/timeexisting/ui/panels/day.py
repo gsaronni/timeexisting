@@ -30,7 +30,8 @@ _WEEKEND_ACTIVITY_PERIOD_SECONDS = 30
 _OFF_DAY_DEDICATED_LABELS = frozenset({"sick", "afspadsering"})
 
 
-def render(resolved: Resolved, theme: Theme) -> Panel:
+def render(resolved: Resolved, theme: Theme, *, start_inferred: bool = False) -> Panel:
+    """`start_inferred` marks a day start that was inferred rather than observed, typed or confirmed (roadmap section 4): the working window names it so and takes its own style."""
     match resolved.segment.phase:
         case Phase.OFF_DAY:
             return _render_off_day(resolved, theme)
@@ -39,7 +40,7 @@ def render(resolved: Resolved, theme: Theme) -> Panel:
         case Phase.PRE_WORK:
             return _render_pre_work(resolved, theme)
         case Phase.WORKING:
-            return _render_working(resolved, theme)
+            return _render_working(resolved, theme, start_inferred)
         case Phase.LUNCH:
             return _render_lunch(resolved, theme)
         case Phase.POST_WORK:
@@ -161,7 +162,7 @@ def _render_lunch(resolved: Resolved, theme: Theme) -> Panel:
     return Panel(content, title=pick("lunch.panel_title"), border_style=color, expand=True)
 
 
-def _render_working(resolved: Resolved, theme: Theme) -> Panel:
+def _render_working(resolved: Resolved, theme: Theme, start_inferred: bool) -> Panel:
     plan = resolved.plan
     hours, rest = divmod(int(resolved.remaining_to_end.total_seconds()), 3600)
     minutes, seconds = divmod(rest, 60)
@@ -190,12 +191,17 @@ def _render_working(resolved: Resolved, theme: Theme) -> Panel:
             justify="center",
         )
     )
+    window_key, window_style = (
+        ("working.window_inferred", theme.start_inferred)
+        if start_inferred
+        else ("working.window", theme.countdown)
+    )
     content.add_row(
         Text(
-            pick("working.window").format(
+            pick(window_key).format(
                 start=plan.start.strftime("%H:%M"), nominal_end=plan.nominal_end.strftime("%H:%M")
             ),
-            style=theme.countdown,
+            style=window_style,
             justify="center",
         )
     )

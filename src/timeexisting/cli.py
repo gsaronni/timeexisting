@@ -16,10 +16,12 @@ from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
 from timeexisting.domain.clock import Clock, FixedClock, SystemClock
+from timeexisting.domain.day_start import DayStart, Provenance, resolve_day_start
 from timeexisting.domain.resolver import Resolved, resolve
 from timeexisting.domain.schedule import DayFlag, build_day
 from timeexisting.ledger import store
-from timeexisting.ledger.replay import Timeline, replay
+from timeexisting.ledger.events import Event, EventType, Source, profile_for
+from timeexisting.ledger.replay import replay
 from timeexisting.presence import backend
 from timeexisting.ui.app import local_timezone, run, run_demo
 
@@ -203,31 +205,39 @@ def _in_night_window(moment: time, cfg: Config) -> bool:
     return moment >= night_start or moment < night_end  # wraps midnight, e.g. 22:00-06:00
 
 
-def _first_presence_today(timeline: Timeline, host: str, now: datetime) -> time | None:
-    """The local start, to the minute, of `host`'s first presence interval that begins on `now`'s local day and no later than `now`. An interval carried over from the previous day does not count: its start is not today's. Pure; `now` carries the local zone."""
-    starts = [
-        local
-        for presence in timeline.presences
-        if presence.host == host
-        and (local := presence.start.astimezone(now.tzinfo)).date() == now.date()
-        and local <= now
-    ]
-    if not starts:
-        return None
-    return min(starts).time().replace(second=0, microsecond=0)
-
-
-def _ledger_start(now: datetime) -> time | None:
-    """This host's first presence today, from its own shard, as a suggestion for the start prompt. A ledger that cannot be read suggests nothing rather than failing the prompt."""
+def _ledger_start(
+    now: datetime, cfg: Config, *, boot_time: Callable[[], datetime | None] | None = None
+) -> DayStart | None:
+    """Today's start from this host's shard (roadmap section 4): a recorded `day_start`, else the first present instant of the typed timeline, with `boot_time`, by default the collector's `system_boot_time` seam, as the sanity clamp of rule 4. A ledger that cannot be read holds no start rather than failing the launch."""
     host = paths.current_host()
     try:
         result = store.read_shard(store.shard_path(host))
     except OSError:
-        logger.exception("could not read the ledger for a start suggestion")
+        logger.exception("could not read the ledger for the day start")
         return None
-    suggested = _first_presence_today(replay(result.events), host, now)
-    logger.info("start suggestion from the ledger: %s", suggested)
-    return suggested
+    boot = (boot_time or daemon.system_boot_time)()
+    timeline = replay(result.events, micro_max=cfg.absence.micro_max)
+    resolved = resolve_day_start(timeline, host, now, cfg, boot=boot)
+    logger.info("day start from the ledger: %s (boot %s)", resolved, boot)
+    return resolved
+
+
+def _record_start(start: time, detail: str, now: datetime, cfg: Config) -> None:
+    """Write a `day_start`, source `user`, for `now`'s local day: a typed or confirmed start is a fact, recorded the moment it is given so every later launch that day reads it back. A ledger that cannot be written loses the record, not the launch."""
+    host = paths.current_host()
+    moment = datetime.combine(now.date(), start, tzinfo=now.tzinfo).astimezone(UTC)
+    event = Event.new(
+        ts=now.astimezone(UTC),
+        host=host,
+        profile=profile_for(host, cfg),
+        event=EventType.DAY_START,
+        source=Source.USER,
+        data={"start": moment.isoformat(), "detail": detail},
+    )
+    try:
+        store.append(event)
+    except OSError:
+        logger.exception("could not record the day start")
 
 
 def _prompt_start(cfg: Config, *, default: time | None = None, read=input, write=print) -> time:
@@ -264,28 +274,42 @@ def _resolve_start(
     *,
     read=input,
     write=print,
-    suggest: Callable[[datetime], time | None] | None = None,
-) -> time:
-    """`suggest` supplies today's start from the evidence, and defaults to the ledger. It is the prompt's default, and in the night window or after `credit.latest`, where asking is pointless, it is used silently; `credit.default_start` applies only when it has nothing. Weekends and `--start` never consult it."""
+    suggest: Callable[[datetime], DayStart | None] | None = None,
+    record: Callable[[time, str], None] | None = None,
+) -> DayStart:
+    """The day's start by roadmap section 4. `suggest` supplies it from the ledger (`_ledger_start`): a start recorded earlier today, else the first present instant of the typed timeline. `--start` wins over everything; otherwise the ledger's start is used whenever it has one, and only when it has none does the prompt ask, on a weekday between the night window and `credit.latest`, defaulting to `credit.default_start`. At any other hour the default is taken silently, as `inferred`. Weekends take the default without consulting the ledger.
+
+    A `--start` or a typed or confirmed answer is a fact, and `record` writes it to the ledger as a `day_start` the moment it is given, except under `--at`, where the run is a view of a fixed moment and writes nothing."""
+    suggest = suggest or (lambda moment: _ledger_start(moment, cfg))
+    if record is None:
+        record = (
+            (lambda _start, _detail: None)
+            if args.at is not None
+            else (lambda s, d: _record_start(s, d, now, cfg))
+        )
     if args.start is not None:
-        start = args.start
+        resolved = DayStart(args.start, Provenance.FLAG)
+        record(resolved.start, str(Provenance.FLAG))
     elif now.date().weekday() >= 5:
-        start = cfg.credit.default_start
+        resolved = DayStart(cfg.credit.default_start, Provenance.INFERRED)
+    elif (known := suggest(now)) is not None:
+        resolved = known
     elif _in_night_window(now.time(), cfg) or now.time() > cfg.credit.latest:
-        # Nothing reasonable to ask at this hour, but the ledger is still better evidence than the config default.
-        suggested = (suggest or _ledger_start)(now)
-        start = cfg.credit.default_start if suggested is None else suggested
+        # Nothing reasonable to ask at this hour: the fallback is taken without asking, and labelled as inferred.
+        resolved = DayStart(cfg.credit.default_start, Provenance.INFERRED)
     else:
-        suggested = (suggest or _ledger_start)(now)
-        start = _prompt_start(cfg, default=suggested, read=read, write=write)
-    _warn_outside_flex_band(start, cfg)
-    return start
+        resolved = DayStart(_prompt_start(cfg, read=read, write=write), Provenance.PROMPT)
+        record(resolved.start, str(Provenance.PROMPT))
+    _warn_outside_flex_band(resolved.start, cfg)
+    return resolved
 
 
 _INTERRUPTED_EXIT = 130  # 128 + SIGINT, the shell convention for Ctrl+C
 
 
-def _start_or_exit(args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print) -> time:
+def _start_or_exit(
+    args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print
+) -> DayStart:
     """`_resolve_start`, but Ctrl+C at the prompt exits quietly with a pack line and code 130 instead of a traceback. No Rich surface exists yet, so plain output is safe."""
     try:
         return _resolve_start(args, cfg, now, read=read, write=write)
@@ -438,4 +462,13 @@ def main(argv: list[str] | None = None) -> None:
     start = _start_or_exit(args, cfg, _viewer_now(args))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
-    run(clock, cfg, start, flags, label=label, collector_since=_collector_since, spawn_failed=spawn_failed)
+    run(
+        clock,
+        cfg,
+        start.start,
+        flags,
+        label=label,
+        collector_since=_collector_since,
+        spawn_failed=spawn_failed,
+        start_inferred=start.provenance is Provenance.INFERRED,
+    )

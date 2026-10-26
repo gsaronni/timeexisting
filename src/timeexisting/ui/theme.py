@@ -37,6 +37,7 @@ class Theme:
     clock: str
     countdown: str
     countdown_emphasis: str
+    start_inferred: str
     post_work_message: str
     next_break: str
     danger: str
@@ -81,6 +82,7 @@ def load_theme(name: str = DEFAULT_PALETTE) -> Theme:
         clock=roles.get("clock", "white"),
         countdown=roles.get("countdown", "white"),
         countdown_emphasis=roles.get("countdown_emphasis", "bold white"),
+        start_inferred=roles.get("start_inferred", "italic"),
         post_work_message=roles.get("post_work_message", "italic"),
         next_break=roles.get("next_break", "dim"),
         danger=roles.get("danger", "bold red"),

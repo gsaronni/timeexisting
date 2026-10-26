@@ -1,15 +1,16 @@
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 
 import pytest
 
 from timeexisting import cli, paths
-from timeexisting.collector import lockfile, spawn
+from timeexisting.collector import daemon, lockfile, spawn
 from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
+from timeexisting.domain.day_start import DayStart, Provenance
 from timeexisting.domain.schedule import DayFlag
 from timeexisting.ledger import store
-from timeexisting.ledger.events import Event, EventType, Source
-from timeexisting.ledger.replay import replay
+from timeexisting.ledger.events import Confidence, Event, EventType, Source
 
 
 def test_no_arguments_yields_a_system_clock():
@@ -183,22 +184,48 @@ def _at(hour: int, minute: int = 0, day: int = 14) -> datetime:
     return datetime(2026, 9, day, hour, minute, tzinfo=cli.local_timezone())
 
 
-def test_resolve_start_uses_cli_start_without_prompting(cfg):
+_NO_LEDGER_START = lambda _now: None  # noqa: E731
+
+
+def _recorder() -> tuple[list[tuple[time, str]], Callable[[time, str], None]]:
+    recorded: list[tuple[time, str]] = []
+    return recorded, lambda start, detail: recorded.append((start, detail))
+
+
+def test_resolve_start_uses_cli_start_without_prompting_and_records_it(cfg):
     args = cli.build_parser().parse_args(["--start", "08:30"])
-    start = cli._resolve_start(args, cfg, _at(10, 0), read=_unexpected_read)
-    assert start == time(8, 30)
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args, cfg, _at(10, 0), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(time(8, 30), Provenance.FLAG)
+    assert recorded == [(time(8, 30), "flag")]
 
 
 def test_resolve_start_skips_the_prompt_on_a_weekend(cfg):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, _at(10, 0, day=19), read=_unexpected_read)  # Saturday
-    assert start == cfg.credit.default_start
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args, cfg, _at(10, 0, day=19), read=_unexpected_read, record=record
+    )  # Saturday
+    assert start == DayStart(cfg.credit.default_start, Provenance.INFERRED)
+    assert recorded == []
 
 
-def test_resolve_start_prompts_on_an_unflagged_weekday(cfg):
+def test_resolve_start_prompts_on_an_unflagged_weekday_and_records_the_answer(cfg):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, _at(10, 0), read=lambda _p: "08:00", write=lambda _t: None)
-    assert start == time(8, 0)
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args,
+        cfg,
+        _at(10, 0),
+        read=lambda _p: "08:00",
+        write=lambda _t: None,
+        suggest=_NO_LEDGER_START,
+        record=record,
+    )
+    assert start == DayStart(time(8, 0), Provenance.PROMPT)
+    assert recorded == [(time(8, 0), "prompt")]
 
 
 def test_resolve_start_skips_the_prompt_in_the_night_window(cfg):
@@ -206,26 +233,48 @@ def test_resolve_start_skips_the_prompt_in_the_night_window(cfg):
     assert cli._in_night_window(time(23, 0), cfg) is True
     assert cli._in_night_window(time(2, 0), cfg) is True
     assert cli._in_night_window(time(10, 0), cfg) is False
+    recorded, record = _recorder()
 
-    start = cli._resolve_start(args, cfg, _at(23, 0), read=_unexpected_read)
-    assert start == cfg.credit.default_start
+    start = cli._resolve_start(
+        args, cfg, _at(23, 0), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(cfg.credit.default_start, Provenance.INFERRED)
 
-    start = cli._resolve_start(args, cfg, _at(2, 0), read=_unexpected_read)
-    assert start == cfg.credit.default_start
+    start = cli._resolve_start(
+        args, cfg, _at(2, 0), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(cfg.credit.default_start, Provenance.INFERRED)
+    assert recorded == []
 
 
 def test_resolve_start_skips_the_prompt_after_latest_credit(cfg):
     args = cli.build_parser().parse_args([])
     assert cfg.credit.latest == time(19, 0)
+    recorded, record = _recorder()
 
-    start = cli._resolve_start(args, cfg, _at(20, 0), read=_unexpected_read)
-    assert start == cfg.credit.default_start
+    start = cli._resolve_start(
+        args, cfg, _at(20, 0), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(cfg.credit.default_start, Provenance.INFERRED)
+    assert recorded == []
 
 
 def test_resolve_start_prompts_right_up_to_latest_credit(cfg):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, _at(18, 59), read=lambda _p: "08:00", write=lambda _t: None)
-    assert start == time(8, 0)
+    start = cli._resolve_start(
+        args,
+        cfg,
+        _at(18, 59),
+        read=lambda _p: "08:00",
+        write=lambda _t: None,
+        suggest=_NO_LEDGER_START,
+        record=_discard,
+    )
+    assert start == DayStart(time(8, 0), Provenance.PROMPT)
+
+
+def _discard(_start: time, _detail: str) -> None:
+    pass
 
 
 def test_collect_parses_with_and_without_a_subcommand():
@@ -342,10 +391,12 @@ def test_ctrl_c_at_the_start_prompt_exits_quietly_with_130(cfg):
     assert written[-1] in _pool("start.interrupted")
 
 
-def test_start_or_exit_passes_a_normal_answer_through(cfg):
+def test_start_or_exit_passes_a_normal_answer_through(cfg, monkeypatch):
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
     args = cli.build_parser().parse_args([])
     monday_morning = datetime(2026, 9, 14, 7, 30, tzinfo=cli.local_timezone())
-    assert cli._start_or_exit(args, cfg, monday_morning, read=lambda _: "08:15", write=print) == time(8, 15)
+    start = cli._start_or_exit(args, cfg, monday_morning, read=lambda _: "08:15", write=print)
+    assert start == DayStart(time(8, 15), Provenance.PROMPT)
 
 
 def test_main_exits_130_without_a_traceback_on_ctrl_c_at_the_prompt(capsys, monkeypatch):
@@ -361,14 +412,15 @@ def test_main_exits_130_without_a_traceback_on_ctrl_c_at_the_prompt(capsys, monk
     assert "Traceback" not in captured.err
 
 
-def _presence_event(ts: datetime, kind: str, host: str | None = None, reason: str = "launch"):
+def _ledger_event(ts: datetime, kind: str, source: Source = Source.COLLECTOR, **data: str) -> Event:
     return Event.new(
         ts=ts,
-        host=host or paths.current_host(),
+        host=paths.current_host(),
         profile="work",
         event=EventType(kind),
-        source=Source.COLLECTOR,
-        data={"reason": reason},
+        source=source,
+        confidence=Confidence.INFERRED if source is Source.PROBE else Confidence.OBSERVED,
+        data=data,
     )
 
 
@@ -376,55 +428,157 @@ def _utc(day: int, hour: int, minute: int, second: int = 0) -> datetime:
     return datetime(2026, 9, day, hour, minute, second, tzinfo=UTC)
 
 
+def _no_boot() -> datetime | None:
+    return None
+
+
 _TUESDAY_10_LOCAL = datetime(2026, 9, 29, 10, 0, tzinfo=cli.local_timezone())
 
 
-def test_first_presence_today_is_the_earliest_start_of_the_local_day_to_the_minute():
-    host = paths.current_host()
-    timeline = replay(
-        [
-            _presence_event(_utc(29, 6, 5, 42), "collector_start"),  # 08:05:42 local
-            _presence_event(_utc(29, 6, 40), "collector_stop"),
-            _presence_event(_utc(29, 7, 15), "collector_start", reason="resumed"),
-        ]
+def test_ledger_start_reads_this_hosts_shard(cfg):
+    store.append(_ledger_event(_utc(29, 6, 12, 30), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 6, 12, 30), "unlock", Source.EVENTLOG))  # 08:12:30 local
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=_no_boot) == DayStart(
+        time(8, 12), Provenance.OBSERVED
     )
-    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) == time(8, 5)
 
 
-def test_first_presence_today_uses_the_local_day_not_the_utc_day():
-    host = paths.current_host()
-    # 22:30 UTC on the 28th is 00:30 on the 29th in Copenhagen.
-    timeline = replay([_presence_event(_utc(28, 22, 30), "collector_start")])
-    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) == time(0, 30)
+def test_ledger_start_is_none_without_a_ledger(cfg):
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=_no_boot) is None
 
 
-def test_first_presence_today_ignores_yesterday_other_hosts_and_the_future():
-    host = paths.current_host()
-    timeline = replay(
-        [
-            _presence_event(_utc(28, 20, 0), "collector_start"),  # yesterday 22:00 local, still open
-            _presence_event(_utc(29, 6, 0), "collector_start", host="elsewhere"),
-            _presence_event(_utc(29, 9, 0), "collector_start", reason="resumed"),  # 11:00 local, after now
-        ]
-    )
-    assert cli._first_presence_today(timeline, host, _TUESDAY_10_LOCAL) is None
-
-
-def test_ledger_start_reads_this_hosts_shard():
-    store.append(_presence_event(_utc(29, 6, 12), "collector_start"))
-    assert cli._ledger_start(_TUESDAY_10_LOCAL) == time(8, 12)
-
-
-def test_ledger_start_is_none_without_a_ledger():
-    assert cli._ledger_start(_TUESDAY_10_LOCAL) is None
-
-
-def test_ledger_start_survives_an_unreadable_ledger(monkeypatch):
+def test_ledger_start_survives_an_unreadable_ledger(cfg, monkeypatch):
     def unreadable(_path):
         raise PermissionError("locked")
 
     monkeypatch.setattr(store, "read_shard", unreadable)
-    assert cli._ledger_start(_TUESDAY_10_LOCAL) is None
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=_no_boot) is None
+
+
+def test_ledger_start_clamps_on_the_machines_boot_time(cfg):
+    """Rule 4 through the seam: presence open since yesterday, no boot in the ledger, the collector down."""
+    store.append(_ledger_event(_utc(28, 14, 0), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(28, 14, 0), "unlock", Source.PROBE))
+    booted_today = _utc(29, 7, 0)  # 09:00 local
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=lambda: booted_today) is None
+    booted_yesterday = _utc(28, 10, 0)
+    expected = DayStart(cfg.credit.earliest, Provenance.INFERRED)
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=lambda: booted_yesterday) == expected
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=_no_boot) == expected
+
+
+def test_ledger_start_reads_the_boot_time_from_the_collectors_seam_by_default(cfg, monkeypatch):
+    store.append(_ledger_event(_utc(28, 14, 0), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(28, 14, 0), "unlock", Source.PROBE))
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: _utc(29, 7, 0))
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg) is None
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    assert cli._ledger_start(_TUESDAY_10_LOCAL, cfg) == DayStart(cfg.credit.earliest, Provenance.INFERRED)
+
+
+def test_ledger_start_replays_with_the_configured_micro_max(cfg, monkeypatch):
+    seen: list[object] = []
+    real_replay = cli.replay
+
+    def spy(events, **kwargs):
+        seen.append(kwargs.get("micro_max"))
+        return real_replay(events, **kwargs)
+
+    monkeypatch.setattr(cli, "replay", spy)
+    cli._ledger_start(_TUESDAY_10_LOCAL, cfg, boot_time=_no_boot)
+    assert seen == [cfg.absence.micro_max]
+
+
+def test_record_start_writes_a_day_start_for_the_local_day(cfg):
+    cli._record_start(time(8, 55), "prompt", _TUESDAY_10_LOCAL, cfg)
+    [event] = store.read_shard(store.shard_path(paths.current_host())).events
+    assert (event.event, event.source, event.confidence) == (
+        EventType.DAY_START,
+        Source.USER,
+        Confidence.OBSERVED,
+    )
+    assert event.ts == _TUESDAY_10_LOCAL
+    assert event.host == paths.current_host()
+    assert event.profile == cfg.profiles.default
+    assert dict(event.data) == {"start": "2026-09-29T06:55:00+00:00", "detail": "prompt"}
+
+
+def test_record_start_survives_an_unwritable_ledger(cfg, monkeypatch):
+    def unwritable(_event):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(store, "append", unwritable)
+    cli._record_start(time(8, 55), "flag", _TUESDAY_10_LOCAL, cfg)
+
+
+def test_a_start_typed_at_the_first_launch_survives_a_relaunch_on_the_silent_late_branch(cfg, monkeypatch):
+    """2 October: a start typed at the first launch was re-derived at a later launch and moved. Now it is recorded and read back, and the relaunch re-derives only when nothing was recorded."""
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    args = cli.build_parser().parse_args([])
+    first = cli._resolve_start(args, cfg, _at(10, 5, day=29), read=lambda _p: "08:55", write=lambda _t: None)
+    assert first == DayStart(time(8, 55), Provenance.PROMPT)
+
+    store.append(_ledger_event(_utc(29, 7, 33), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 7, 33, 30), "unlock", Source.EVENTLOG))  # 09:33:30 local
+    relaunch = cli._resolve_start(args, cfg, _at(20, 0, day=29), read=_unexpected_read)
+    assert relaunch == DayStart(time(8, 55), Provenance.PROMPT)
+
+    store.shard_path(paths.current_host()).unlink()
+    store.append(_ledger_event(_utc(29, 7, 33), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 7, 33, 30), "unlock", Source.EVENTLOG))
+    assert cli._resolve_start(args, cfg, _at(20, 0, day=29), read=_unexpected_read) == DayStart(
+        time(9, 33), Provenance.OBSERVED
+    )
+
+
+def test_the_evidence_is_taken_without_a_prompt_and_only_the_flag_overrides_it(cfg, monkeypatch):
+    """2 October under step 8: the 09:33 unlock is the start without asking, so the typed 08:55 goes through `--start`, and the relaunch reads it back."""
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    store.append(_ledger_event(_utc(29, 7, 33), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 7, 33, 30), "unlock", Source.EVENTLOG))
+    plain = cli.build_parser().parse_args([])
+    assert cli._resolve_start(plain, cfg, _at(10, 5, day=29), read=_unexpected_read) == DayStart(
+        time(9, 33), Provenance.OBSERVED
+    )
+
+    flagged = cli.build_parser().parse_args(["--start", "08:55"])
+    assert cli._resolve_start(flagged, cfg, _at(10, 5, day=29), read=_unexpected_read) == DayStart(
+        time(8, 55), Provenance.FLAG
+    )
+    assert cli._resolve_start(plain, cfg, _at(20, 0, day=29), read=_unexpected_read) == DayStart(
+        time(8, 55), Provenance.FLAG
+    )
+
+
+def test_start_flag_wins_over_a_start_confirmed_earlier_and_is_read_back(cfg, monkeypatch):
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    plain = cli.build_parser().parse_args([])
+    cli._resolve_start(plain, cfg, _at(10, 5, day=29), read=lambda _p: "08:55", write=lambda _t: None)
+    flagged = cli.build_parser().parse_args(["--start", "08:30"])
+    assert cli._resolve_start(flagged, cfg, _at(10, 13, day=29), read=_unexpected_read) == DayStart(
+        time(8, 30), Provenance.FLAG
+    )
+    assert cli._resolve_start(plain, cfg, _at(10, 20, day=29), read=_unexpected_read) == DayStart(
+        time(8, 30), Provenance.FLAG
+    )
+
+
+def test_a_start_is_not_recorded_under_a_fixed_clock(cfg, monkeypatch):
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    fixed = cli.build_parser().parse_args(["--at", "2026-09-29 10:05", "--start", "08:30"])
+    assert cli._resolve_start(fixed, cfg, _TUESDAY_10_LOCAL, read=_unexpected_read) == DayStart(
+        time(8, 30), Provenance.FLAG
+    )
+    prompted = cli.build_parser().parse_args(["--at", "2026-09-29 10:05"])
+    answer = cli._resolve_start(
+        prompted, cfg, _TUESDAY_10_LOCAL, read=lambda _p: "08:40", write=lambda _t: None
+    )
+    assert answer == DayStart(time(8, 40), Provenance.PROMPT)
+    assert not store.shard_path(paths.current_host()).exists()
+
+    live = cli.build_parser().parse_args(["--start", "08:30"])
+    cli._resolve_start(live, cfg, _TUESDAY_10_LOCAL, read=_unexpected_read)
+    assert len(store.read_shard(store.shard_path(paths.current_host())).events) == 1
 
 
 def test_prompt_shows_and_accepts_the_suggested_default(cfg):
@@ -442,59 +596,80 @@ def test_prompt_override_beats_the_suggested_default(cfg):
     assert cli._prompt_start(cfg, default=time(8, 12), read=lambda _: "08:40") == time(8, 40)
 
 
-def test_resolve_start_offers_the_ledger_suggestion_at_the_prompt(cfg):
+@pytest.mark.parametrize("provenance", [Provenance.OBSERVED, Provenance.INFERRED, Provenance.LOGON])
+def test_resolve_start_takes_the_ledger_start_without_prompting_or_recording(cfg, provenance):
+    args = cli.build_parser().parse_args([])
+    recorded, record = _recorder()
+    known = DayStart(time(8, 12), provenance)
+    start = cli._resolve_start(
+        args, cfg, _TUESDAY_10_LOCAL, read=_unexpected_read, suggest=lambda _now: known, record=record
+    )
+    assert start == known
+    assert recorded == []
+
+
+def test_resolve_start_prompts_with_the_config_default_when_the_ledger_has_nothing(cfg):
+    """An empty answer confirms the default, and a confirmed start is a fact: it is recorded like a typed one."""
     args = cli.build_parser().parse_args([])
     prompts: list[str] = []
+    recorded, record = _recorder()
 
     def read(prompt: str) -> str:
         prompts.append(prompt)
         return ""
 
-    start = cli._resolve_start(args, cfg, _TUESDAY_10_LOCAL, read=read, suggest=lambda _now: time(8, 12))
-    assert start == time(8, 12)
-    assert prompts == ["Start time [08:12]: "]
-
-
-def test_resolve_start_falls_back_to_the_config_default_without_a_suggestion(cfg):
-    args = cli.build_parser().parse_args([])
-    prompts: list[str] = []
-
-    def read(prompt: str) -> str:
-        prompts.append(prompt)
-        return ""
-
-    start = cli._resolve_start(args, cfg, _TUESDAY_10_LOCAL, read=read, suggest=lambda _now: None)
-    assert start == cfg.credit.default_start
+    start = cli._resolve_start(
+        args, cfg, _TUESDAY_10_LOCAL, read=read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(cfg.credit.default_start, Provenance.PROMPT)
     assert prompts == [f"Start time [{cfg.credit.default_start:%H:%M}]: "]
+    assert recorded == [(cfg.credit.default_start, "prompt")]
 
 
-def test_resolve_start_reads_no_ledger_when_it_does_not_prompt(cfg):
+def test_resolve_start_reads_no_ledger_for_a_flag_or_a_weekend(cfg):
     never = lambda _now: pytest.fail("must not consult the ledger")  # noqa: E731
     given = cli.build_parser().parse_args(["--start", "08:30"])
-    assert cli._resolve_start(given, cfg, _TUESDAY_10_LOCAL, suggest=never) == time(8, 30)
+    assert cli._resolve_start(given, cfg, _TUESDAY_10_LOCAL, suggest=never, record=_discard) == DayStart(
+        time(8, 30), Provenance.FLAG
+    )
     saturday = datetime(2026, 9, 26, 10, 0, tzinfo=cli.local_timezone())
     plain = cli.build_parser().parse_args([])
-    assert cli._resolve_start(plain, cfg, saturday, suggest=never) == cfg.credit.default_start
+    assert cli._resolve_start(plain, cfg, saturday, suggest=never, record=_discard) == DayStart(
+        cfg.credit.default_start, Provenance.INFERRED
+    )
 
 
 @pytest.mark.parametrize("hour", [20, 23, 2])
 def test_silent_late_and_night_branches_use_the_ledger_start(cfg, hour):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, _at(hour), read=_unexpected_read, suggest=lambda _now: time(9, 15))
-    assert start == time(9, 15)
+    known = DayStart(time(9, 15), Provenance.OBSERVED)
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args, cfg, _at(hour), read=_unexpected_read, suggest=lambda _now: known, record=record
+    )
+    assert start == known
+    assert recorded == []
 
 
 @pytest.mark.parametrize("hour", [20, 23, 2])
 def test_silent_late_and_night_branches_fall_back_without_a_ledger_start(cfg, hour):
     args = cli.build_parser().parse_args([])
-    start = cli._resolve_start(args, cfg, _at(hour), read=_unexpected_read, suggest=lambda _now: None)
-    assert start == cfg.credit.default_start
+    recorded, record = _recorder()
+    start = cli._resolve_start(
+        args, cfg, _at(hour), read=_unexpected_read, suggest=_NO_LEDGER_START, record=record
+    )
+    assert start == DayStart(cfg.credit.default_start, Provenance.INFERRED)
+    assert recorded == []
 
 
-def test_silent_late_branch_reads_the_real_ledger(cfg):
-    store.append(_presence_event(_utc(14, 7, 15), "collector_start", reason="resumed"))  # 09:15 local
+def test_silent_late_branch_reads_the_real_ledger(cfg, monkeypatch):
+    monkeypatch.setattr(daemon, "system_boot_time", lambda: None)
+    store.append(_ledger_event(_utc(14, 7, 15), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(14, 7, 15), "unlock", Source.EVENTLOG))  # 09:15 local
     args = cli.build_parser().parse_args([])
-    assert cli._resolve_start(args, cfg, _at(20, 0), read=_unexpected_read) == time(9, 15)
+    assert cli._resolve_start(args, cfg, _at(20, 0), read=_unexpected_read) == DayStart(
+        time(9, 15), Provenance.OBSERVED
+    )
 
 
 def test_flex_warning_every_line_names_the_start_and_the_band():

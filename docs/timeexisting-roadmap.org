@@ -269,6 +269,7 @@ Replay derives three independent facts for every instant:
 |---|---|
 | =unlock= (session notification, Winlogon/Operational record, or probe) | =lock= |
 | Session logon time, if it falls on the current local day | =suspend= |
+| | A boot start (a start record, or the collector's =boot_time()= line, section 8): the machine is up on the sign-in screen, =away= until an =unlock= |
 | User input after a resume, on a session that was already unlocked: a Kernel-Power 507 with reason 31, 32, 15 or 1, or otherwise =GetLastInputInfo= | A deliberate =collector_stop= (=stop_file=, =signal=, =console_close=, and the test-only =max_ticks=): closed until the next =collector_start=, never reconstructed. A =session_end= stop closes presence but its gap is reconstructed like any other |
 | | Loss of observation that neither the System log nor the Winlogon/Operational log covers: a channel unreadable, a gap beyond retention, or a run in WTS-only mode. A gap both logs cover is reconstructed from them (section 8) and closes nothing by itself |
 

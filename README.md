@@ -93,8 +93,8 @@ te --help
 | Command | What it does |
 |---|---|
 | `te` | Open the dashboard. Asks for today's start time, offering today's first recorded presence as the default, and starts a collector if none is running. |
-| `te --start 08:30` | Open the dashboard with the start time given, skipping the prompt. |
-| `te --flag half-day` | Apply a day flag; may be repeated. |
+| `te --start 08:30`, `te -s 08:30` | Open the dashboard with the start time given, skipping the prompt. |
+| `te --flag half-day`, `te -f half-day` | Apply a day flag; may be repeated. |
 | `te --at "2026-09-17 10:30"` | Run the dashboard at a fixed Europe/Copenhagen moment. Starts no collector. |
 | `te --demo` | Cycle through fixed moments: every phase of the day, both weekend days, every month. Starts no collector. |
 | `te --no-collector` | Open the dashboard without starting a collector. |

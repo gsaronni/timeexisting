@@ -11,6 +11,7 @@ import pytest
 from timeexisting import paths
 from timeexisting.collector import daemon, lockfile
 from timeexisting.collector.evidence import Evidence
+from timeexisting.collector.reconcile import ReadState
 from timeexisting.ledger import store
 from timeexisting.ledger.events import Confidence, Event, EventType, Source, profile_for
 from timeexisting.ledger.replay import IntervalType, replay
@@ -137,6 +138,55 @@ def test_a_held_lock_refuses_before_writing_anything(cfg):
         _run(cfg, _ManualClock(_T0), max_ticks=1)
     assert _ledger() == ()
     assert not paths.checkpoint_file(_host()).exists()
+
+
+def _reconciled(ts: datetime) -> None:
+    daemon.write_checkpoint(
+        _host(), ts, SessionState.UNLOCKED, ReadState(system_cursor=ts, winlogon_cursor=ts)
+    )
+
+
+def test_reconciled_checkpoint_is_none_without_one_or_for_the_runs_first():
+    """No checkpoint, then the one `_loop` writes right after `collector_start` (time and pid only): neither counts."""
+    assert daemon.reconciled_checkpoint(_host(), os.getpid()) is None
+    daemon.write_checkpoint(_host(), _T0)
+    assert daemon.reconciled_checkpoint(_host(), os.getpid()) is None
+
+
+def test_reconciled_checkpoint_is_the_tick_once_the_cursors_are_held():
+    _reconciled(_T0)
+    assert daemon.reconciled_checkpoint(_host(), os.getpid()) == _T0
+    assert daemon.reconciled_checkpoint(_host(), os.getpid() + 1) is None, "another process's checkpoint"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        '{"ts": "not a time", "pid": PID, "system_cursor": "2026-09-17T06:00:00+00:00", "pending": []}',
+        '{"ts": "2026-09-17T06:00:00", "pid": PID, "system_cursor": "2026-09-17T06:00:00+00:00", "pending": []}',
+        '{"pid": PID, "system_cursor": "2026-09-17T06:00:00+00:00", "pending": []}',
+        "[]",
+        "not json",
+    ],
+    ids=["unparseable-ts", "naive-ts", "no-ts", "not-a-record", "not-json"],
+)
+def test_reconciled_checkpoint_is_none_for_a_record_it_cannot_read(record):
+    paths.checkpoint_file(_host()).write_text(record.replace("PID", str(os.getpid())), encoding="utf-8")
+    assert daemon.reconciled_checkpoint(_host(), os.getpid()) is None
+
+
+def test_the_reconciled_checkpoint_is_written_only_after_the_first_read(cfg):
+    """Seen from the event log reader: at the first read (the backfill) the checkpoint on disk is the run's first, not reconciled; at the second read, the next tick's, the checkpoint of the start is reconciled; the clean stop deletes it."""
+    seen: list[datetime | None] = []
+
+    class _Log(_FakeEventLog):
+        def system_boundaries(self, _since: datetime, _until: datetime) -> list:
+            seen.append(daemon.reconciled_checkpoint(_host(), os.getpid()))
+            return []
+
+    _run(cfg, _ManualClock(_T0), max_ticks=1, event_log=_Log(ChannelCheck(system=True, winlogon=True)))
+    assert seen == [None, _T0]
+    assert daemon.reconciled_checkpoint(_host(), os.getpid()) is None
 
 
 def test_recovery_writes_an_inferred_unclean_stop_before_the_start(cfg):

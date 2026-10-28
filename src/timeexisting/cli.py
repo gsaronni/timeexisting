@@ -12,7 +12,7 @@ from importlib.resources import files
 from zoneinfo import ZoneInfo
 
 from timeexisting import logging_setup, paths
-from timeexisting.collector import daemon, lockfile, spawn
+from timeexisting.collector import daemon, lockfile, reconcile, spawn
 from timeexisting.config import loader
 from timeexisting.config.models import Config, ConfigError
 from timeexisting.content.phrases import pick
@@ -261,6 +261,35 @@ def _ledger_start(
     return resolved
 
 
+def _ledger_start_after_tick(
+    now: datetime,
+    cfg: Config,
+    owner: lockfile.LockStatus,
+    *,
+    sleep: Callable[[float], object] = time_module.sleep,
+    boot_time: Callable[[], datetime | None] | None = None,
+) -> DayStart | None:
+    """`_ledger_start` for a viewer that found a collector running. When the ledger holds no start, the collector may not have read the morning yet: after a night's sleep a viewer launched within a tick of the wake reads a ledger without the wake's unlock. So a resolution of `None` waits for the collector's next reconciled checkpoint, the tick after the one on disk, bounded by one tick plus the pending window (`reconcile.PENDING_WINDOW`, the longest a sleep waits for its System record), and resolves once more; the prompt is the caller's only when that is still `None`. A first resolution that succeeds waits for nothing and reads no checkpoint. The checkpoint on disk is read after the first replay, so a tick that lands between the two is waited out once more rather than missed."""
+    known = _ledger_start(now, cfg, boot_time=boot_time)
+    if known is not None:
+        return known
+    before = daemon.reconciled_checkpoint(owner.host, owner.pid)
+    timeout = (cfg.collector.tick + reconcile.PENDING_WINDOW).total_seconds()
+    logger.info("no start in the ledger; waiting up to %.0fs for the collector's next tick", timeout)
+    if spawn.wait_for_reconciliation(owner, after=before, timeout=timeout, sleep=sleep) is None:
+        logger.warning("the collector wrote no reconciled checkpoint within %.0fs; asking", timeout)
+        return None
+    return _ledger_start(now, cfg, boot_time=boot_time)
+
+
+def _suggestion(ensured: spawn.Ensured | None, cfg: Config) -> Callable[[datetime], DayStart | None]:
+    """The ledger reader `_resolve_start` consults: `_ledger_start_after_tick` for a collector this viewer found running, `_ledger_start` otherwise (one it spawned, which `spawn.ensure_running` already waited for, one that never took its lock, or none at all)."""
+    if ensured is not None and not ensured.spawned and ensured.owner is not None:
+        owner = ensured.owner
+        return lambda moment: _ledger_start_after_tick(moment, cfg, owner)
+    return lambda moment: _ledger_start(moment, cfg)
+
+
 def _record_start(start: time, detail: str, now: datetime, cfg: Config) -> None:
     """Write a `day_start`, source `user`, for `now`'s local day: a typed or confirmed start is a fact, recorded the moment it is given so every later launch that day reads it back. A ledger that cannot be written loses the record, not the launch."""
     host = paths.current_host()
@@ -347,11 +376,17 @@ _INTERRUPTED_EXIT = 130  # 128 + SIGINT, the shell convention for Ctrl+C
 
 
 def _start_or_exit(
-    args: argparse.Namespace, cfg: Config, now: datetime, *, read=input, write=print
+    args: argparse.Namespace,
+    cfg: Config,
+    now: datetime,
+    *,
+    read=input,
+    write=print,
+    suggest: Callable[[datetime], DayStart | None] | None = None,
 ) -> DayStart:
     """`_resolve_start`, but Ctrl+C at the prompt exits quietly with a pack line and code 130 instead of a traceback. No Rich surface exists yet, so plain output is safe."""
     try:
-        return _resolve_start(args, cfg, now, read=read, write=write)
+        return _resolve_start(args, cfg, now, read=read, write=write, suggest=suggest)
     except KeyboardInterrupt:
         logger.info("start-time prompt interrupted")
         write("")  # the prompt left the cursor mid-line
@@ -579,11 +614,11 @@ class _LedgerState:
         return self._derived
 
 
-def _start_collector(args: argparse.Namespace) -> bool:
-    """Make sure a collector runs before the Rich surface exists, unless this session opted out. Returns true when one was spawned and never took its lock."""
+def _start_collector(args: argparse.Namespace) -> spawn.Ensured | None:
+    """Make sure a collector runs before the Rich surface exists, unless this session opted out, in which case `None`. What came back says whether the collector was found or spawned, and whether a spawned one ever took its lock."""
     if args.no_collector or args.at is not None or args.demo:
-        return False
-    return spawn.ensure_running() is None
+        return None
+    return spawn.ensure_running()
 
 
 def _load_config_or_exit() -> Config:
@@ -611,13 +646,13 @@ def main(argv: list[str] | None = None) -> None:
         _run_collect_command(args, cfg)
         return
 
-    spawn_failed = _start_collector(args)
+    ensured = _start_collector(args)
 
     if args.demo:
         run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
         return
 
-    start = _start_or_exit(args, cfg, _viewer_now(args))
+    start = _start_or_exit(args, cfg, _viewer_now(args), suggest=_suggestion(ensured, cfg))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
     run(
@@ -627,6 +662,6 @@ def main(argv: list[str] | None = None) -> None:
         flags,
         label=label,
         collector_state=_LedgerState(cfg),
-        spawn_failed=spawn_failed,
+        spawn_failed=ensured is not None and ensured.failed,
         start_inferred=start.provenance is Provenance.INFERRED,
     )

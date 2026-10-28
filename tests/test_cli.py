@@ -1,11 +1,13 @@
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 
 import pytest
 
 from timeexisting import cli, paths
-from timeexisting.collector import daemon, lockfile, spawn
+from timeexisting.collector import daemon, lockfile, reconcile, spawn
+from timeexisting.collector.reconcile import ReadState
 from timeexisting.content import phrases
 from timeexisting.domain.clock import FixedClock, SystemClock
 from timeexisting.domain.day_start import DayStart, Provenance
@@ -386,18 +388,139 @@ def test_no_collector_parses_and_defaults_off():
 @pytest.mark.parametrize("argv", [["--no-collector"], ["--at", "2026-09-17 07:30"], ["--demo"]])
 def test_start_collector_is_skipped_when_opted_out(argv, monkeypatch):
     monkeypatch.setattr(spawn, "ensure_running", lambda: pytest.fail("must not start a collector"))
-    assert cli._start_collector(cli.build_parser().parse_args(argv)) is False
+    assert cli._start_collector(cli.build_parser().parse_args(argv)) is None
 
 
 def test_start_collector_reports_a_spawn_that_never_took_the_lock(monkeypatch):
-    monkeypatch.setattr(spawn, "ensure_running", lambda: None)
-    assert cli._start_collector(cli.build_parser().parse_args([])) is True
+    failed = spawn.Ensured(None, spawned=True)
+    monkeypatch.setattr(spawn, "ensure_running", lambda: failed)
+    assert cli._start_collector(cli.build_parser().parse_args([])) is failed
+    assert failed.failed is True
 
 
 def test_start_collector_reports_success_when_a_collector_runs(monkeypatch):
     lock = lockfile.acquire("collector")
-    monkeypatch.setattr(spawn, "ensure_running", lambda: lock.status)
-    assert cli._start_collector(cli.build_parser().parse_args([])) is False
+    found = spawn.Ensured(lock.status, spawned=False)
+    monkeypatch.setattr(spawn, "ensure_running", lambda: found)
+    assert cli._start_collector(cli.build_parser().parse_args([])) is found
+    assert found.failed is False
+
+
+def _reconciled_checkpoint(ts: datetime) -> None:
+    """A checkpoint as the collector writes it after a reconciliation, for this process's pid."""
+    daemon.write_checkpoint(paths.current_host(), ts, None, ReadState(system_cursor=ts, winlogon_cursor=ts))
+
+
+def test_suggestion_waits_for_a_tick_only_for_a_collector_found_running(cfg, monkeypatch):
+    """A found collector may not have read the morning yet, so its reader is `_ledger_start_after_tick`; a spawned one was waited for by `ensure_running`, and a failed spawn or no collector has nothing to wait for."""
+    seen: list[str] = []
+    monkeypatch.setattr(cli, "_ledger_start_after_tick", lambda *_a, **_k: seen.append("after tick"))
+    monkeypatch.setattr(cli, "_ledger_start", lambda *_a, **_k: seen.append("plain"))
+    lock = lockfile.acquire("collector")
+    for ensured in (
+        spawn.Ensured(lock.status, spawned=False),
+        spawn.Ensured(lock.status, spawned=True),
+        spawn.Ensured(None, spawned=True),
+        None,
+    ):
+        cli._suggestion(ensured, cfg)(_TUESDAY_10_LOCAL)
+    assert seen == ["after tick", "plain", "plain", "plain"]
+
+
+def test_a_found_collector_reads_the_wake_on_its_next_tick_and_no_prompt_appears(cfg):
+    """After a night's sleep, a viewer launched within a tick of the wake: the ledger holds the run but not yet the unlock. The viewer waits for the collector's next reconciled checkpoint, the one after the tick on disk, and resolves again: the unlock, no prompt, one wait."""
+    lock = lockfile.acquire("collector")
+    store.append(_ledger_event(_utc(28, 14, 0), "collector_start", reason="launch"))
+    _reconciled_checkpoint(_utc(29, 8, 0))
+    waited: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        waited.append(seconds)
+        store.append(_ledger_event(_utc(29, 6, 12, 30), "unlock", Source.EVENTLOG))  # 08:12:30 local
+        _reconciled_checkpoint(_utc(29, 8, 0, 30))
+
+    start = cli._ledger_start_after_tick(_TUESDAY_10_LOCAL, cfg, lock.status, sleep=sleep, boot_time=_no_boot)
+    assert start == DayStart(time(8, 12), Provenance.OBSERVED)
+    assert len(waited) == 1
+
+    args = cli.build_parser().parse_args([])
+    resolved = cli._resolve_start(
+        args,
+        cfg,
+        _TUESDAY_10_LOCAL,
+        read=_unexpected_read,
+        suggest=lambda now: cli._ledger_start_after_tick(
+            now, cfg, lock.status, sleep=sleep, boot_time=_no_boot
+        ),
+    )
+    assert resolved == DayStart(time(8, 12), Provenance.OBSERVED)
+
+
+def test_a_found_collectors_next_tick_with_nothing_to_read_gives_the_prompt(cfg):
+    """Control: the next tick lands and holds nothing: `None` after one wait, and the prompt."""
+    lock = lockfile.acquire("collector")
+    store.append(_ledger_event(_utc(28, 14, 0), "collector_start", reason="launch"))
+    _reconciled_checkpoint(_utc(29, 8, 0))
+    waited: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        waited.append(seconds)
+        _reconciled_checkpoint(_utc(29, 8, 0, 30))
+
+    assert (
+        cli._ledger_start_after_tick(_TUESDAY_10_LOCAL, cfg, lock.status, sleep=sleep, boot_time=_no_boot)
+        is None
+    )
+    assert len(waited) == 1
+
+    prompts: list[str] = []
+    args = cli.build_parser().parse_args([])
+    resolved = cli._resolve_start(
+        args,
+        cfg,
+        _TUESDAY_10_LOCAL,
+        read=lambda prompt: prompts.append(prompt) or "08:30",
+        suggest=lambda now: cli._ledger_start_after_tick(
+            now, cfg, lock.status, sleep=sleep, boot_time=_no_boot
+        ),
+        record=lambda _s, _d: None,
+    )
+    assert resolved == DayStart(time(8, 30), Provenance.PROMPT)
+    assert len(prompts) == 1
+
+
+def test_a_found_collector_that_never_ticks_gives_the_prompt_after_the_bounded_wait(cfg, caplog):
+    """Control: no reconciled checkpoint ever arrives: the wait is one tick plus the pending window, then `None`."""
+    lock = lockfile.acquire("collector")
+    store.append(_ledger_event(_utc(28, 14, 0), "collector_start", reason="launch"))
+    _reconciled_checkpoint(_utc(29, 8, 0))
+    waited: list[float] = []
+
+    with caplog.at_level(logging.WARNING, logger=cli.__name__):
+        start = cli._ledger_start_after_tick(
+            _TUESDAY_10_LOCAL, cfg, lock.status, sleep=waited.append, boot_time=_no_boot
+        )
+    assert start is None
+    assert sum(waited) == pytest.approx((cfg.collector.tick + reconcile.PENDING_WINDOW).total_seconds())
+    assert any("no reconciled checkpoint" in record.message for record in caplog.records)
+
+
+def test_a_found_collector_with_a_start_in_the_ledger_waits_for_nothing(cfg, monkeypatch):
+    """Control: the first resolution succeeds: no sleep and no checkpoint read."""
+    lock = lockfile.acquire("collector")
+    store.append(_ledger_event(_utc(29, 6, 12, 30), "collector_start", reason="launch"))
+    store.append(_ledger_event(_utc(29, 6, 12, 30), "unlock", Source.EVENTLOG))
+    monkeypatch.setattr(
+        daemon, "reconciled_checkpoint", lambda *_: pytest.fail("must not read the checkpoint")
+    )
+    start = cli._ledger_start_after_tick(
+        _TUESDAY_10_LOCAL,
+        cfg,
+        lock.status,
+        sleep=lambda _: pytest.fail("must not wait"),
+        boot_time=_no_boot,
+    )
+    assert start == DayStart(time(8, 12), Provenance.OBSERVED)
 
 
 def test_collector_state_follows_the_lock(cfg):

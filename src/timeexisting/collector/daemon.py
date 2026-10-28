@@ -202,6 +202,26 @@ def read_checkpoint_reads(host: str) -> ReadState | None:
     return ReadState.from_record(record) if isinstance(record, dict) else None
 
 
+def reconciled_checkpoint(host: str, pid: int) -> datetime | None:
+    """The tick of the checkpoint for `host` when the collector with `pid` wrote it after a reconciliation: the first checkpoint of a run that holds the read cursors is written in `_loop` after the first `Reconciler.tick`, the backfill of the gap since the previous run, and the startup probe; every later tick's checkpoint holds them too. `None` when there is no checkpoint, it belongs to another process, it does not parse, or it is the run's first checkpoint, written right after `collector_start` and before the first read. The viewer polls this (`spawn.wait_for_reconciliation`) before it resolves the day's start."""
+    try:
+        record = json.loads(paths.checkpoint_file(host).read_bytes().decode("utf-8"))
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict) or record.get("pid") != pid:
+        return None
+    reads = ReadState.from_record(record)
+    if reads.system_cursor is None and reads.winlogon_cursor is None:
+        return None
+    try:
+        ts = datetime.fromisoformat(record["ts"])
+    except KeyError, TypeError, ValueError:
+        return None
+    if ts.tzinfo is None or ts.utcoffset() is None:
+        return None
+    return ts
+
+
 def delete_checkpoint(host: str) -> None:
     target = paths.checkpoint_file(host)
     target.unlink(missing_ok=True)

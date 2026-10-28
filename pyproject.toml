@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name            = "timeexisting"
-version         = "0.2.2"
+version         = "0.3.0"
 description     = "A work-time tracker with a dim view of work, time and tracking."
 readme          = "README.md"
 requires-python = ">=3.14"

@@ -148,6 +148,8 @@ Given start =S=: morning block =S= to 11:00, lunch 11:00 to 11:30, afternoon blo
 | 08:30 | 2h30 | 4h54 | 16:24 |
 | 09:00 | 2h00 | 5h24 | 16:54 |
 
+The lunch window keeps its place while it fits strictly inside the working window, with working time on both sides of it. Otherwise it moves to =S= and keeps its 30m: a start at or after 11:00 begins with the lunch, and so does a day too short to reach the window before its nominal end, such as a half day from 07:00. The deduction and =nominal_end= do not move with it, so for every start the paid segments add up to the target, nothing paid opens before =S=, and progress reaches 100% exactly at =nominal_end=, never before.
+
 ** Day flags
 
 A =dayflag= event modifies how the day is built. Set with =f= on the dashboard or =te day --flag <name>=. Flags append to the ledger like any event and supersede rather than overwrite.

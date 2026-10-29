@@ -59,7 +59,7 @@ There are two installs, and they never share data. Prod is the one you use: a uv
 Install from a release tag with [uv](https://docs.astral.sh/uv/), then create the Startup shortcut once (`-WhatIf` to preview, `-Uninstall` to remove):
 
 ```powershell
-uv tool install git+https://github.com/gsaronni/timeexisting@v0.3.0
+uv tool install git+https://github.com/gsaronni/timeexisting@v0.3.1
 te --help
 pwsh scripts\install-startup.ps1
 ```

@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 44, 28 October 2026 (phase 3 step 10: the viewer resolves the day's start only after the collector's reconciliation; the spawn timeout is 5 s).
+*Last revised:* week 44, 30 October 2026 (fix for issue #3: =q= quits the viewer; the render loop polls the terminal once per tick, no reader thread, section 12).
 
 
 * 1. Purpose and Scope
@@ -80,7 +80,7 @@ The dashboard is not open all day. The collector must survive the terminal closi
 - Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= on phase 2 shards, where a clock jump was written as a stop and start pair.
 - Clock jump. If the clock shows more than twice the tick interval (60 seconds) since the previous tick, the machine was suspended. From phase 3 this no longer writes a =collector_stop= and =collector_start= pair: the collector holds the gap as pending in the checkpoint until the System log, read every tick, resolves it (section 8), or writes one =suspend= and one =resume= from the clock when it does not. Phase 2 shards keep their =suspended= and =resumed= pairs, which replay reads as an inferred suspend and resume (section 6). The threshold is well clear of real clock corrections: the largest Kernel-General 1 correction outside a hibernate wake over 21 days at step 0 was 2.6 seconds.
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP=, =pythonw.exe=), wait for the lockfile (5 s: the interpreter's start took 3.0 to 3.9 s on the work laptop at step 10), then for the collector's first reconciliation (10 s), attach. Stale lock, reclaim and spawn. The lock is taken before the backfill of the gap since the previous run, so the viewer does not resolve the day's start until the checkpoint written after the first event log read, the first of the run that holds the read cursors, is on disk for the spawned pid; on 28 October 2026 the viewer read the ledger 30 ms after the lock, before the morning's unlock was backfilled, and prompted. On the timeout the viewer carries on and reads the ledger as it stands. A collector found running is attached at once; when the ledger then holds no start for the day, the viewer waits for that collector's next reconciled checkpoint (bounded by one tick plus the pending window of section 8) and resolves once more before it prompts, since a launch within a tick of a wake reads a ledger without the wake's unlock. A first resolution that succeeds waits for nothing.
-- =q= quits the viewer and leaves the collector. =Q= stops both.
+- =q= quits the viewer and leaves the collector. =Q= stops both. The viewer reads keys by polling the terminal once per render tick (section 12), never on a thread.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
 - The hidden window. On Windows the collector creates one hidden top-level window on a daemon thread: a registered window class, no parent, no =WS_VISIBLE=, never shown, =WS_EX_TOOLWINDOW= so it has no taskbar entry. Not a message-only window (=HWND_MESSAGE= parent): those cannot be enumerated and do not receive broadcast messages, and the session-end and power broadcasts go to the session's top-level windows, so a message-only window never hears them; the first live restart confirmed it. This one window is the receiver for every Windows notification the collector uses, and no second window is created:
   - Session end: =WM_QUERYENDSESSION= and =WM_ENDSESSION=.
@@ -513,7 +513,7 @@ Tables: =[holidays.add]=, =[holidays.remove]=, =[ferie]=, =[sygdom]=, =[afspadse
 
 ** Keys
 
-=readchar= on a daemon thread into a queue, drained by the render loop. Anything needing the full terminal calls =live.stop()= first.
+The render loop polls the terminal once per tick, after the sleep and before the next repaint, and drains every key that arrived: =msvcrt.kbhit= and =getwch= on Windows (a = = or =à= prefix is a special key, consumed with its second half and dropped); on POSIX the terminal is put in cbreak for the viewer's lifetime, =ISIG= left on so Ctrl+C stays a signal, =select= with a zero timeout and a one-byte =os.read=, the saved attributes restored on every exit. When stdin is not a terminal nothing is polled. No reader thread and no =readchar=: a thread blocked in a read cannot be stopped, holds the terminal mode at exit, and is one more place a Ctrl+C can land, and a key answered within one tick is as prompt as the display. Anything needing the full terminal calls =live.stop()= first.
 
 | Key | Action |
 |---|---|

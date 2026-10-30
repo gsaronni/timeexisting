@@ -214,3 +214,64 @@ def test_run_footer_follows_the_collector_each_tick(cfg, monkeypatch):
     assert lines[1] == phrases.pick("app.collector.state.present").format(since="08:30")
     # Seen once, then gone: a stop, not a failed spawn.
     assert lines[2] == phrases.pick("app.collector.absent")
+
+
+def test_run_returns_on_q_without_an_interrupt(cfg, monkeypatch):
+    clock = FixedClock(datetime(2026, 10, 7, 9, 0, tzinfo=UTC))
+    console = Console(file=StringIO(), force_terminal=True, width=80)
+    pressed = iter(["q"])
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) > 3:
+            pytest.fail("q did not stop the loop")
+
+    monkeypatch.setattr(app.time, "sleep", fake_sleep)
+    app.run(clock, cfg, time(8, 30), frozenset(), console=console, keys=lambda: next(pressed, None))
+
+    assert sleep_calls == [1.0]
+    output = console.file.getvalue()
+    assert phrases.pick("app.quit") in output
+    assert "liberated" not in output
+
+
+def test_run_drains_every_pending_key_and_only_lowercase_q_quits(cfg, monkeypatch):
+    """Two keys in one tick, neither of them `q`, are dropped, `Q` included; the `q` on the next tick quits."""
+    clock = FixedClock(datetime(2026, 10, 7, 9, 0, tzinfo=UTC))
+    console = Console(file=StringIO(), force_terminal=True, width=80)
+    pressed = iter(["Q", "x", None, "q", None])
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) > 3:
+            pytest.fail("q did not stop the loop")
+
+    monkeypatch.setattr(app.time, "sleep", fake_sleep)
+    app.run(clock, cfg, time(8, 30), frozenset(), console=console, keys=lambda: next(pressed, None))
+
+    assert sleep_calls == [1.0, 1.0]
+    assert phrases.pick("app.quit") in console.file.getvalue()
+
+
+def test_run_demo_returns_on_q_without_an_interrupt(cfg, monkeypatch):
+    scenarios = (("Lunch", _resolved(cfg, datetime(2026, 9, 14, 11, 5, tzinfo=app.local_timezone()))),)
+    console = Console(file=StringIO(), force_terminal=True, width=80)
+    pressed = iter([None, "q"])
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if len(sleep_calls) > 3:
+            pytest.fail("q did not stop the demo")
+
+    monkeypatch.setattr(app.time, "sleep", fake_sleep)
+    app.run_demo(
+        scenarios, cfg, step_seconds=4.0, refresh_hz=1.0, console=console, keys=lambda: next(pressed, None)
+    )
+
+    assert sleep_calls == [1.0, 1.0]
+    output = console.file.getvalue()
+    assert phrases.pick("app.quit") in output
+    assert "liberated" not in output

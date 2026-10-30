@@ -7,6 +7,13 @@ Live repaint rate and the content-update sleep. On Ctrl+C, `Live`'s context
 manager stops the display before the `except` block prints the exit line;
 nothing sleeps on the way out (defect 11).
 
+Keys (roadmap section 12). The loop is handed `keys`, a non-blocking poll
+returning one pending key per call or `None`, from `ui/keys.py`; this module
+never touches the terminal itself. After each tick's sleep every pending key
+is drained; a `q` leaves `Live` cleanly and prints the quit line. Capital
+`Q`, which is to stop the collector too, does nothing yet. Without `keys`
+the loop ends only on Ctrl+C.
+
 Each tick builds the day's `DayPlan` from the (already-localized) date and
 resolves it against the (already-localized) instant, so `Resolved.now` is
 directly usable by the panels without further conversion.
@@ -45,6 +52,14 @@ from timeexisting.ui.theme import Theme, load_theme
 
 TIMEZONE_NAME = "Europe/Copenhagen"
 
+QUIT_KEY = "q"
+
+Poll = Callable[[], str | None]
+
+
+class _Quit(Exception):
+    """Raised inside the `Live` block when the quit key is read, so `Live` stops the display before the quit line is printed, exactly as Ctrl+C does."""
+
 
 @cache
 def local_timezone() -> ZoneInfo:
@@ -61,6 +76,16 @@ def _update(
     layout["main"]["left"]["year"].update(year.render(resolved.now, theme))
     layout["main"]["left"]["week"].update(week.render(resolved, cfg, theme))
     layout["main"]["right"].update(day.render(resolved, theme, start_inferred=start_inferred))
+
+
+def _quit_pressed(keys: Poll | None) -> bool:
+    """Drain every key pressed since the last tick. `q` quits; every other key, `Q` included, is dropped."""
+    if keys is None:
+        return False
+    quit_seen = False
+    while (key := keys()) is not None:
+        quit_seen = quit_seen or key == QUIT_KEY
+    return quit_seen
 
 
 _STATE_KEYS = {
@@ -120,8 +145,9 @@ def run(
     collector_state: Callable[[], CollectorState] | None = None,
     spawn_failed: bool = False,
     start_inferred: bool = False,
+    keys: Poll | None = None,
 ) -> None:
-    """`collector_state` returns whether a collector runs and the derived state of this host's ledger; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock. `start_inferred` says `start` was inferred (roadmap section 4), which the day panel shows."""
+    """`collector_state` returns whether a collector runs and the derived state of this host's ledger; when it is itself `None` the footer carries no collector line. `spawn_failed` marks a collector the viewer tried to start that never took its lock. `start_inferred` says `start` was inferred (roadmap section 4), which the day panel shows. `keys` is the non-blocking key poll drained after every tick; `None` means the loop ends only on Ctrl+C."""
     theme = load_theme()
     layout = build_layout(theme)
     console = console or Console()
@@ -148,8 +174,12 @@ def run(
                 resolved = resolve(now_local, plan)
                 _update(layout, resolved, cfg, theme, start_inferred=start_inferred)
                 time.sleep(interval)
+                if _quit_pressed(keys):
+                    raise _Quit
     except KeyboardInterrupt:
         console.print(pick("app.interrupted"), style=theme.danger)
+    except _Quit:
+        console.print(pick("app.quit"), style=theme.muted)
 
 
 def run_demo(
@@ -159,11 +189,12 @@ def run_demo(
     step_seconds: float = 4.0,
     refresh_hz: float = 1.0,
     console: Console | None = None,
+    keys: Poll | None = None,
 ) -> None:
     """Cycle the panels through a fixed list of `(label, resolved)` scenarios,
     each held for `step_seconds` before advancing, looping forever. Every
     scenario is a precomputed `Resolved` at a fixed moment: this is a
-    showcase of states, not an accelerated clock.
+    showcase of states, not an accelerated clock. `keys` is as in `run`.
     """
     theme = load_theme()
     layout = build_layout(theme)
@@ -184,5 +215,9 @@ def run_demo(
                     for _ in range(ticks_per_step):
                         _update(layout, resolved, cfg, theme)
                         time.sleep(interval)
+                        if _quit_pressed(keys):
+                            raise _Quit
     except KeyboardInterrupt:
         console.print(pick("app.interrupted"), style=theme.danger)
+    except _Quit:
+        console.print(pick("app.quit"), style=theme.muted)

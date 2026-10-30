@@ -13,7 +13,6 @@ dependencies = [
     "rich>=13.7",
     "platformdirs>=4.2",
     "psutil>=5.9",
-    "readchar>=4.1",
     "holidays>=0.57",
     "tzdata>=2024.1; sys_platform == 'win32'",
     "pywin32>=306; sys_platform == 'win32'",

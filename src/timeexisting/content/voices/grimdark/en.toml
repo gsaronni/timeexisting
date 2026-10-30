@@ -7,8 +7,9 @@ subtitle = ["The Existential Progress Tracker: Because Tracking Your Slow Descen
 
 [app]
 starting = ["Starting Existential Time Tracker..."]
-footer = ["Tracking the inevitable passage of time... (Press Ctrl+C to escape)"]
+footer = ["Tracking the inevitable passage of time... (q or Ctrl+C to escape)"]
 interrupted = ["Progress tracking interrupted. The corporate overlords are displeased, but your soul is momentarily liberated."]
+quit = ["You left the dashboard. The hours continue without an audience."]
 demo_tag = ["[DEMO]"]
 
 [app.collector]

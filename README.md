@@ -106,7 +106,7 @@ te --help
 | `te config init` | Write the packaged defaults there, if no file exists yet. |
 | `te config check` | Load and validate the config. |
 
-Ctrl+C leaves the dashboard; the collector keeps running.
+`q` or Ctrl+C leaves the dashboard; the collector keeps running.
 
 ## Configuration
 

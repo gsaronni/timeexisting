@@ -34,6 +34,7 @@ from timeexisting.ledger.events import Event, EventType, Source, profile_for
 from timeexisting.ledger.replay import IntervalType, Timeline, replay
 from timeexisting.presence import backend
 from timeexisting.ui.app import collector_phrase, local_timezone, run, run_demo
+from timeexisting.ui.keys import key_source
 
 logger = logging.getLogger(__name__)
 
@@ -649,19 +650,22 @@ def main(argv: list[str] | None = None) -> None:
     ensured = _start_collector(args)
 
     if args.demo:
-        run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg)
+        with key_source() as keys:
+            run_demo(_demo_scenarios(SystemClock().now(), cfg), cfg, keys=keys)
         return
 
     start = _start_or_exit(args, cfg, _viewer_now(args), suggest=_suggestion(ensured, cfg))
     flags = frozenset(args.flags)
     clock, label = _build_clock(args)
-    run(
-        clock,
-        cfg,
-        start.start,
-        flags,
-        label=label,
-        collector_state=_LedgerState(cfg),
-        spawn_failed=ensured is not None and ensured.failed,
-        start_inferred=start.provenance is Provenance.INFERRED,
-    )
+    with key_source() as keys:
+        run(
+            clock,
+            cfg,
+            start.start,
+            flags,
+            label=label,
+            collector_state=_LedgerState(cfg),
+            spawn_failed=ensured is not None and ensured.failed,
+            start_inferred=start.provenance is Provenance.INFERRED,
+            keys=keys,
+        )

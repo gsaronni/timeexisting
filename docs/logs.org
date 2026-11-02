@@ -28,6 +28,24 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-11-02, release v0.3.2
+
+*Asked:* on =release/v0.3.2=, level with =master= after PR #26. Bump the version to 0.3.2, update the README install line, add this entry. No code changes.
+
+*Done:*
+- Version 0.3.2 through =uv version 0.3.2=: =pyproject.toml= and the =timeexisting= entry in =uv.lock=, one line each. The re-sync kept the =dev= extra, so no =uv sync --extra dev= was needed.
+- README: the =uv tool install= line points at the =v0.3.2= tag. No other =v0.3.1= mention in the file.
+- 1322 tests, 1320 passed and the 2 POSIX cases skipped on Windows; every pre-commit hook passes on all files.
+
+*Since v0.3.1:*
+- =q= quits the viewer and leaves the collector running (issue #3, PR #25). The render loop polls the terminal once per tick through =ui/keys.py=, no reader thread; the footer and README say "q or Ctrl+C".
+- =readchar= dropped from the dependencies and the lock; it had been imported nowhere since the scaffold.
+- Docs escape repair (PR #26): PR #25 had written =\x00= and =\xe0= through a Bash heredoc that collapsed the backslashes, leaving a real NUL and a literal "à" in this log and in roadmap section 12, and git treated this file as binary. Both restored to the escape text. A local =no-control-chars= pre-commit hook, matched by file extension because =types: [text]= skips a file holding a NUL, rejects control characters in =org=, =md=, =py=, =toml=, =yaml=, =txt=, =cfg= and =ini= files.
+
+*Carried over:*
+- First prod run on v0.3.2 is the live check that =msvcrt.kbhit= sees =q= while Rich holds the alternate screen (entry of 2026-10-30).
+- The hook cannot catch a decoded printable escape such as "à" for =\xe0=; only a read of the diff does.
+
 ** 2026-10-30, fix: =q= quits the viewer (issue #3)
 
 *Asked:* on =fix/q-quits=, level with =master= at v0.3.1, outside the phase 3 steps. Issue #3: =q= does nothing in the viewer under Windows Terminal, only Ctrl+C exits. Read-only first: where keys are read, the path of a =q=, why Ctrl+C works, a failing test, a plan. Then the fix under a changed design: no reader thread and no =readchar=; a context manager yielding a non-blocking poll, drained by the render loop after each tick's sleep; failing test first, shown failing twice (on the signature, then on the behaviour); =readchar= removed; pack, README, roadmap sections 3 and 12, this entry. The collector must not be affected.

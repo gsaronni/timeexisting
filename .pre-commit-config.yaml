@@ -14,3 +14,10 @@ repos:
         exclude: ^src/timeexisting/assets/ascii_art/
       - id: check-toml
       - id: check-merge-conflict
+  - repo: local
+    hooks:
+      - id: no-control-chars
+        name: reject control characters
+        language: pygrep
+        entry: '[\x00-\x08\x0b\x0c\x0e-\x1f]'
+        files: '\.(org|md|py|toml|ya?ml|txt|cfg|ini)$'

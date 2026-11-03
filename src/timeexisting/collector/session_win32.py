@@ -5,6 +5,8 @@ The detached collector runs under `pythonw.exe` with no console, so a console co
 The same window, and no second one, receives the session and power notifications. After creation it registers with `WTSRegisterSessionNotification` for this session only, and unregisters when it is destroyed. `WTS_SESSION_LOCK` and `WTS_SESSION_UNLOCK` become `lock` and `unlock`, source `wts`; `PBT_APMSUSPEND` becomes `suspend` and each resume message becomes `resume`, source `power`, with the message name in `detail`. The window thread never writes them: it puts them in the collector's `Inbox`, stamped at receipt, and the tick loop writes them (single writer). Every session-end, session-change and power message is logged at INFO with `wParam` and `lParam` on arrival, so a live test shows delivery even when a later step fails.
 
 The window is top-level, not message-only. A message-only window (`HWND_MESSAGE` parent) cannot be enumerated and does not receive broadcast messages, and the session-end and power messages are delivered to the top-level windows of the session, so a message-only window never hears them: the first live restart proved it. The window is never shown (no `WS_VISIBLE`) and carries `WS_EX_TOOLWINDOW`, so it has no taskbar or Alt+Tab entry.
+
+Issue #10 evidence. `install` first logs one INFO line from `collector/jobinfo_win32.py`: this process's pid, `sys.executable` and running image, its parent's pid and image, and whether it sits in a job object and with which limit flags. A restart that still recovers as `unclean` can then be read against that line. The probe changes nothing, and a probe that fails is logged and skipped.
 """
 
 import logging
@@ -18,7 +20,9 @@ import win32console
 import win32gui
 import win32ts
 
+from timeexisting.collector import jobinfo_win32
 from timeexisting.collector.daemon import Inbox, Shutdown, StopReason
+from timeexisting.collector.jobinfo import format_probe
 from timeexisting.ledger.events import EventType, Source
 
 logger = logging.getLogger(__name__)
@@ -193,7 +197,14 @@ def console_attached() -> bool:
 
 
 def install(shutdown: Shutdown, inbox: Inbox) -> SessionWatcher:
-    """Watch for session end on behalf of `shutdown` and put session and power transitions in `inbox`: a console control handler when a console is attached, and always the hidden top-level window. A window that cannot be created is logged and the collector carries on without it."""
+    """Watch for session end on behalf of `shutdown` and put session and power transitions in `inbox`: a console control handler when a console is attached, and always the hidden top-level window. A window that cannot be created is logged and the collector carries on without it.
+
+    Before any of that, one INFO line with the job object probe (issue #10 evidence). This is the collector's only Windows-only entry point, reached from `daemon._loop` through `on_start` once the lock is held, so the line is written exactly once per run and nothing is logged off Windows. The probe reads static facts about the process, so the ticks between the lock and this call change nothing it reports.
+    """
+    try:
+        logger.info(format_probe(jobinfo_win32.probe()))
+    except Exception:
+        logger.exception("job probe failed; the collector carries on")
     watcher = SessionWatcher(shutdown, inbox)
     if console_attached():
         win32api.SetConsoleCtrlHandler(watcher.console_handler, True)

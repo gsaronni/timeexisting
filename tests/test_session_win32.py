@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ win32ts = pytest.importorskip("win32ts")
 pywintypes = pytest.importorskip("pywintypes")
 
 from timeexisting import paths  # noqa: E402
-from timeexisting.collector import lockfile, session_win32  # noqa: E402
+from timeexisting.collector import jobinfo_win32, lockfile, session_win32  # noqa: E402
 from timeexisting.collector.daemon import Inbox, StopReason, Transition  # noqa: E402
 from timeexisting.domain.clock import FixedClock  # noqa: E402
 from timeexisting.ledger import store  # noqa: E402
@@ -381,3 +382,39 @@ def test_install_hands_the_inbox_to_the_window(recording, inbox, monkeypatch):
     finally:
         watcher.close()
     assert inbox.drain() == [Transition(_T0, EventType.LOCK, Source.WTS)]
+
+
+# Issue #10 evidence: the job object probe, logged once by `install`.
+
+
+def test_install_logs_the_job_probe_once_before_the_window(recording, inbox, monkeypatch, caplog):
+    monkeypatch.setattr(session_win32, "console_attached", lambda: False)
+    caplog.set_level(logging.INFO, logger="timeexisting")
+    watcher = session_win32.install(recording, inbox)
+    watcher.close()
+    probes = [record.message for record in caplog.records if record.message.startswith("job probe: ")]
+    assert len(probes) == 1
+    image = jobinfo_win32.image_path(os.getpid())
+    assert probes[0].startswith(
+        f"job probe: pid {os.getpid()}, executable {sys.executable}, image {image}, parent pid "
+    )
+    assert caplog.text.index("job probe: ") < caplog.text.index("session watcher window")
+
+
+def test_a_failing_job_probe_is_logged_and_the_window_still_serves(recording, inbox, monkeypatch, caplog):
+    monkeypatch.setattr(session_win32, "console_attached", lambda: False)
+
+    def explode():
+        raise RuntimeError("ctypes gone")
+
+    monkeypatch.setattr(session_win32.jobinfo_win32, "probe", explode)
+    caplog.set_level(logging.INFO, logger="timeexisting")
+    watcher = session_win32.install(recording, inbox)
+    try:
+        assert watcher.hwnd is not None
+        win32gui.SendMessage(watcher.hwnd, win32con.WM_ENDSESSION, 1, 0)
+        assert recording.calls == [StopReason.SESSION_END]
+    finally:
+        watcher.close()
+    assert "job probe failed" in caplog.text
+    assert "job probe: " not in caplog.text

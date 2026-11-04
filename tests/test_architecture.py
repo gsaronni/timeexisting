@@ -29,6 +29,7 @@ _PURE_MODULES = [
     _SRC_ROOT / "presence" / "eventlog.py",
     _SRC_ROOT / "collector" / "evidence.py",
     _SRC_ROOT / "collector" / "jobinfo.py",
+    _SRC_ROOT / "collector" / "respawn.py",
 ]
 _MODULES_EXCEPT_CLOCK = [path for path in _ALL_MODULES if path != _CLOCK_MODULE]
 _MODULES_EXCEPT_THEME = [path for path in _ALL_MODULES if path != _THEME_MODULE]

@@ -1,6 +1,6 @@
 """The Windows I/O half of the job object probe (issue #10 evidence): the only code that asks Windows about this process's parent and job. Imported only on Windows, by `collector/session_win32.py`.
 
-Follows `presence/eventlog_win32.py`: every function here is a seam that raises `JobInfoUnavailable` on failure and parses nothing, and `probe` hands them to the pure `jobinfo.gather`, which turns each failure into a field value. Nothing here asks for elevation: the parent is opened with `PROCESS_QUERY_LIMITED_INFORMATION`, which a user has on their own processes, and the job queries are about the calling process's own job. `ctypes` is used because pywin32's `win32job` cannot query the current job through a null handle.
+Follows `presence/eventlog_win32.py`: every function here is a seam that raises `JobInfoUnavailable` on failure and parses nothing, and `probe` hands them to the pure `jobinfo.gather`, which turns each failure into a field value. `in_job` and `limit_flags` are also read by the respawn hook (`collector/respawn_win32.py`) before anything else is imported, so this module imports nothing beyond ctypes at module level. Nothing here asks for elevation: the parent is opened with `PROCESS_QUERY_LIMITED_INFORMATION`, which a user has on their own processes, and the job queries are about the calling process's own job. `ctypes` is used because pywin32's `win32job` cannot query the current job through a null handle.
 """
 
 import ctypes
@@ -8,8 +8,6 @@ import functools
 import os
 import sys
 from ctypes import wintypes
-
-import psutil
 
 from timeexisting.collector.jobinfo import JobProbe, gather
 
@@ -97,7 +95,9 @@ def _failure(function: str) -> JobInfoUnavailable:
 
 
 def parent_pid() -> int:
-    """The pid of this process's parent, as the kernel records it; the parent may already be gone."""
+    """The pid of this process's parent, as the kernel records it; the parent may already be gone. psutil is imported here, on first use, because the respawn hook (`collector/respawn_win32.py`) imports this module before anything else and reads only the ctypes seams."""
+    import psutil
+
     try:
         return psutil.Process(os.getpid()).ppid()
     except psutil.Error as error:

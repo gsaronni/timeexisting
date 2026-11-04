@@ -1,6 +1,6 @@
 """The viewer's side of the collector lifecycle (roadmap section 3): when no collector holds the lock, start one detached, wait briefly for its lock to appear, and then for its first reconciliation, so the start the viewer resolves next reads the gap the collector backfills.
 
-The collector is identified only through `lockfile.status`, never through the `Popen` pid. A venv's `pythonw.exe` is a launcher, and the real collector is its child process with a different pid.
+The collector is identified only through `lockfile.status`, never through the `Popen` pid, and the wait below polls the lock alone, never the spawned process. A venv's `pythonw.exe` is a launcher that runs the base interpreter as its child inside a job object that dies with the launcher; that child, finding itself there, starts the base interpreter once more outside the job and exits (`collector/respawn.py`, issue #10). So the collector that takes the lock is two processes away from the `Popen` pid, and the launcher has already returned by the time the lock appears.
 
 The lock is taken before the backfill: a spawned collector acquires its lock, recovers, writes `collector_start` and only then reads the event logs for the gap since its last run (`daemon._loop`). On 28 October 2026 the viewer resolved the start within 30 ms of the lock, read a ledger without the morning's unlock, and prompted. So the viewer now waits for the checkpoint the collector writes after that first read, the first one of the run that holds the read cursors (`daemon.reconciled_checkpoint`), under a bounded timeout; on the timeout it carries on and resolves the start as the ledger stands.
 """
@@ -17,6 +17,7 @@ from pathlib import Path
 
 from timeexisting.collector import lockfile
 from timeexisting.collector.daemon import ROLE, reconciled_checkpoint
+from timeexisting.collector.respawn import DETACHED_FLAGS
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,8 @@ SPAWN_TIMEOUT = 5.0
 SETTLE_TIMEOUT = 10.0
 _POLL_SECONDS = 0.25
 
-# DETACHED_PROCESS already implies no console; CREATE_NO_WINDOW is kept for the case where the interpreter found is a console `python.exe`.
-_WINDOWS_FLAGS = (
-    0x00000008 | 0x00000200 | 0x08000000
-)  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+# DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW, shared with the collector's own respawn.
+_WINDOWS_FLAGS = DETACHED_FLAGS
 
 
 @dataclass(frozen=True, slots=True)

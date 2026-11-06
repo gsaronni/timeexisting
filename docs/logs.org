@@ -28,6 +28,24 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 
 * Entries
 
+** 2026-11-06, release v0.3.3
+
+*Asked:* on =release/v0.3.3=, level with =master= after PR #30. Bump the version to 0.3.3, update the README install line, add this entry. No code changes.
+
+*Done:*
+- Version 0.3.3 through =uv version 0.3.3=: =pyproject.toml= and the =timeexisting= entry in =uv.lock=, one line each.
+- README: the =uv tool install= line points at the =v0.3.3= tag. No other =v0.3.2= mention in the file.
+- 1406 tests, 1404 passed and the 2 POSIX cases skipped on Windows; =ruff format --check .= and =ruff check .= clean.
+
+*Since v0.3.2:*
+- The collector logs a job object probe at start on Windows (PR #29): its executable, image, parent, job membership and limit flags, one INFO line, nothing on POSIX. The evidence for issue #10: the collector sat inside the venv launcher's job with =KILL_ON_JOB_CLOSE=.
+- The collector respawns outside the launcher's kill-on-close job (PR #30): a Windows collector started as a bare =collect= checks its own job before taking the lock and, when the job allows breakaway, restarts itself through the base interpreter and exits; a console run, a guard variable, a job without breakaway or an unreadable field all mean stay and log why.
+- Issue #10 fixed: verified on a Windows Update restart on 5 November, the collector wrote =session_end= 0.6 s after the restart request.
+
+*Carried over:*
+- The uv tool launcher's own check line is still to be read from a prod log on v0.3.3.
+- Launch to lock takes two interpreter starts; worth reading again from a real viewer launch (entry of 2026-11-03).
+
 ** 2026-11-03, issue #10 fix: the collector respawns outside the launcher's job
 
 *Asked:* on =fix/10-respawn-outside-job=, after the merge of the probe (PR #29). The detached dev collector reported =executable .venv\Scripts\pythonw.exe=, image the base =pythonw.exe=, parent the venv's =pythonw.exe=, =in job yes=, flags 0x3000 (=SILENT_BREAKAWAY_OK | KILL_ON_JOB_CLOSE=): the redirector launcher dies unheard at session end and its job takes the collector with it. Design R from the read-only report of the same day: before the lock, a Windows collector checks its own job and, inside a kill-on-close job that allows breakaway, starts =sys._base_executable -m timeexisting collect= with =__PYVENV_LAUNCHER__= set to its =sys.executable= and a guard variable, spawn's creation flags (=CREATE_BREAKAWAY_FROM_JOB= added when only =BREAKAWAY_OK= is set), streams on =DEVNULL=, closes its log handler and exits 0. The hook in =__main__.py= before =cli= is imported, acting only for argv exactly =["collect"]=; no breakaway, an unavailable field or the guard set: stay and log why; POSIX: no-op. Amendments: a console run never respawns; the spawn wait checked for a dependence on the spawned process; =__init__.py= reported; the integration test asserts the launcher's return and the lock's survival, not =in job no=, because a CI runner may wrap tests in its own job; the roadmap's spawn paragraph and =spawn.py='s docstring describe the hop. Tests first, with the failing run reported; no git commands, Edit and Write only.

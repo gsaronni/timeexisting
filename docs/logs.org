@@ -18,7 +18,7 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 | 0 | complete | =phase-0= | prompt at =docs/phase-0-prompt.md= |
 | 1 | complete | =phase-1= | prompt at =docs/phase-1-prompt.md= |
 | 2 | complete | =phase-2= | prompt at =docs/phase-2-prompt.md= |
-| 3 | step 10 in review | | prompt at =docs/phase-3-prompt.md=; live checks run 26 to 28 October 2026, one finding open (the viewer resolves the start before the spawned collector's backfill) |
+| 3 | complete | =phase-3= | prompt at =docs/phase-3-prompt.md=; tagged at v0.3.0, post-tag releases v0.3.1 to v0.3.3; closed 9 November 2026 |
 | 4 | | | |
 | 5 | | | |
 | 6 | | | |
@@ -27,6 +27,27 @@ Phase boundaries are git tags: =phase-0=, =phase-1=, and so on. =git log --oneli
 | 9 | | | |
 
 * Entries
+
+** 2026-11-09, phase 3 closed: review and spec drift
+
+*Asked:* on =docs/phase-3-close=, docs only: close phase 3 formally. The phase status table, the items the step 10 entry left for the phase 3 review, and the roadmap brought in line with the code at v0.3.3: section 2 rewritten from the legacy defect list to the current state and the known defects, section 3 (unclean-stop recovery, =Q=, session end on Windows), section 8 (deliberate stops on POSIX), the section 12 key table marked with the phase each unbuilt key arrives in, section 18 extended. No change under =src/=, =tests/= or the README; Edit only, no git commands.
+
+*Done:*
+- =docs/logs.org=: phase 3 =complete=, tag =phase-3=, this entry.
+- =docs/timeexisting-roadmap.org=: *Last revised* to week 46; section 2 replaced (current state, the phase 0 pointer, five known defects); section 3 says when a leftover checkpoint yields no inferred stop and that =Q= is phase 8; the Windows session-end paragraph records issue #10's cause, fix and verification; section 8's deliberate-stop paragraph and table row brought in line with =recover= and with POSIX; the section 12 key table carries a status column; section 18 gains five rows and the Fedora row names issue #28.
+- 1406 tests collected, 1404 passed and the 2 POSIX cases skipped on Windows, unchanged; =ruff format --check .=, =ruff check .= and =pre-commit run --all-files= clean.
+
+*Decided:*
+1. =SPAWN_TIMEOUT= stays at 5 s: the integration test measured 4.06 s from launch to lock through the venv launcher (entry of 2026-11-03). Raise it only if a real launch logs "did not answer".
+2. Live check item 9 (a dark or Austerity wake, 507 reason 20 or 55, on an unlocked session) is not a phase gate; it stays opportunistic.
+3. Restart strictness (the 53-minute inferred run after the 27 October restart) and the short-logon start (07:01, 42 s, 28 October) go to roadmap section 18, routed to phase 4.
+4. The =logon= provenance hidden by the 811 Sens 2 record goes to the known defects in roadmap section 2.
+5. The non-ASCII bytes in this log were checked on 9 November 2026: the multiplication sign in the phase 2 entry, the two literal a-grave characters in the v0.3.2 entry (PR #26), the three dashes in the phase 0 and phase 1 entries and the four bar glyphs in the 2 October progress-bar entry, ten in all, all intended; no control bytes in any =docs/*.org=.
+
+*Carried over:*
+- Issue #28 on Linux: systemd's SIGTERM recorded as a deliberate =signal= stop.
+- The passive checks of v0.3.3 in prod: a respawn pair in the collector log after a logon via the Startup shortcut, and =session_end= at the next real restart.
+- Phase 4 next.
 
 ** 2026-11-06, release v0.3.3
 

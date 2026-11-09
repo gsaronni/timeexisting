@@ -11,7 +11,7 @@
 
 *Purpose of this file:* a specification an agent implements against, phase by phase. Sections 1 to 15 are settled constraints. Section 16 is the build order. Section 18 is the only part still open.
 
-*Last revised:* week 44, 30 October 2026 (fix for issue #3: =q= quits the viewer; the render loop polls the terminal once per tick, no reader thread, section 12).
+*Last revised:* week 46, 9 November 2026 (phase 3 closed: spec brought in line with the code at v0.3.3; sections 2, 3, 8, 12 and 18).
 
 
 * 1. Purpose and Scope
@@ -29,20 +29,17 @@ Scope boundaries:
 
 * 2. Current State and Known Defects
 
-=src/timeexisting/_legacy.py= is the original program, retained as the source of tone content and discarded as architecture. It is excluded from linting until phase 0 deletes it.
+Phases 0 to 3 are complete and tagged (=phase-0= to =phase-3=). The current release is v0.3.3 (6 November 2026); phase 3 was tagged at v0.3.0, and v0.3.1 to v0.3.3 followed as fixes on the phase 3 line. Windows is the only live backend (section 6); the Fedora backend is deferred (section 18).
 
-Defects, in order of severity:
+The ten defects of the legacy program were closed in phase 0 and =_legacy.py= was deleted; the list and the fixes are in the phase 0 entry of =logs.org= (2026-09-18).
 
-1. *Indentation defect in =make_time_panel=.* The =if COFFEE_ART and self.showcase_mode:= block sits one level out from its enclosing =if now.hour < START_HOUR:=. The pre-work =return Panel(...)= is nested inside the coffee check and the following =elif now.hour >= END_HOUR:= binds to the coffee =if=. Outside showcase mode a pre-work run falls through to the work-hours branch with =now < start_time=, producing negative elapsed time, a negative percentage, and a negative message index that wraps silently.
-2. *Asset filename drift.* =load_ascii_art("coffee.txt")= against a file named =coffe.txt=. Filenames on disk are canonical and are not renamed. Code adapts.
-3. *Bare =except:=* swallows =KeyboardInterrupt= and =SystemExit=. Narrow to =OSError=.
-4. *Semantic drift in art constants.* Bouldering loads =surf.txt=, hiking loads =fencing.txt=, coding loads =chess.txt=. Constants are renamed to match the files and the activity table rebuilt around the real asset set.
-5. *=ShowcaseState.get_simulated_time= raises and mutates.* =datetime.now().replace(month=...)= raises on days 29 to 31 for short months. It advances =current_month= inside a getter, and =make_layout= calls it for the side effect.
-6. *Layout rebuilt every frame.* =update_display= re-splits the layout every tick.
-7. *Incoherent loop timing.* =refresh_per_second=1= against =time.sleep(0.1)=.
-8. *Dead code.* =SLEEP_HOUR=, =WAKE_HOUR=, presleep and shutdown art constants, unused imports.
-9. *Two day indexings in one function.* Monday-zero and Sunday-zero coexist in =make_week_panel=.
-10. *=is_break_time=.* Three hardcoded special cases. Deleted, not repaired. Breaks are observed, never scheduled.
+Known defects at v0.3.3, none a phase gate:
+
+- Issue #28: on POSIX a detached collector records systemd's SIGTERM at shutdown as a deliberate =signal= stop (=collector/daemon.py=, =ledger/replay.py=; section 8). Deferred to a Linux session.
+- The timeline reads =display.timezone=; the viewer still converts with the =Europe/Copenhagen= constant in =ui/app.py=.
+- A downtime row shorter than one second renders as =0s=.
+- Replay's =day_view= (=ledger/replay.py=) overlaps step 9's =day_rows= (=domain/timeline_view.py=).
+- After a reboot logon the present row reads source =eventlog= where section 6 says =logon=: the pair takes the Winlogon 811 Sens 2 record's source along with its time, so the =logon= provenance cannot surface while Winlogon writes that record.
 
 
 * 3. Architecture
@@ -76,11 +73,11 @@ The dashboard is not open all day. The collector must survive the terminal closi
 
 - Lockfile at =state/collector-{host}.lock= holding PID, hostname, process start time, schema version. Liveness is PID existence plus a matching start time, so a recycled PID cannot masquerade.
 - The ledger records transitions only. The collector ticks every =collector.tick= (30 seconds) but writes no ledger line per tick. Instead each tick atomically overwrites =state/checkpoint-{host}.json=: write a temp file, fsync, =os.replace=. A =PermissionError= on replace is logged and retried on the next tick. A clean stop deletes the checkpoint. The checkpoint holds the current UTC timestamp and the collector's PID and, from phase 3, the last known session state (for the probe, section 6), any pending gap still waiting for its event log record, and the System and Winlogon/Operational read cursors (section 8). State that must survive a crash lives here, never in memory alone.
-- Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run ended without a clean stop. The collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint. The inferred stop is therefore accurate to within one tick. The gap that follows is backfilled from the event logs (section 8).
+- Unclean-stop recovery. At startup, after acquiring the lock and before writing =collector_start=, a leftover checkpoint means the previous run may have ended without a clean stop. When the host's last ledger event is already a =collector_stop= at or after the checkpoint's timestamp, the run did stop cleanly and only the checkpoint's deletion was lost: the checkpoint is deleted and nothing is written. Otherwise the collector writes =collector_stop= at the checkpoint's timestamp with confidence =inferred= and reason =unclean=, then deletes the checkpoint; the inferred stop is therefore accurate to within one tick. A checkpoint that does not parse is deleted without writing anything: nothing is guessed. The gap that follows an inferred stop is backfilled from the event logs (section 8).
 - Every =collector_start= carries a reason: =launch= when the process starts, or =resumed= on phase 2 shards, where a clock jump was written as a stop and start pair.
 - Clock jump. If the clock shows more than twice the tick interval (60 seconds) since the previous tick, the machine was suspended. From phase 3 this no longer writes a =collector_stop= and =collector_start= pair: the collector holds the gap as pending in the checkpoint until the System log, read every tick, resolves it (section 8), or writes one =suspend= and one =resume= from the clock when it does not. Phase 2 shards keep their =suspended= and =resumed= pairs, which replay reads as an inferred suspend and resume (section 6). The threshold is well clear of real clock corrections: the largest Kernel-General 1 correction outside a hibernate wake over 21 days at step 0 was 2.6 seconds.
 - Viewer start: live collector, attach by tailing the ledger. None, spawn one detached (=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW=, the venv's =pythonw.exe=), wait for the lockfile (5 s: the interpreter's start took 3.0 to 3.9 s on the work laptop at step 10), then for the collector's first reconciliation (10 s), attach. Stale lock, reclaim and spawn. The wait polls the lock alone, never the spawned process, because of the hop that follows. The venv's =pythonw.exe= is a launcher, CPython's =venvwlauncher= in a venv and uv's trampoline in a tool install, that runs the base interpreter as its child inside a job object with =KILL_ON_JOB_CLOSE= and =SILENT_BREAKAWAY_OK=; session end terminated the windowless launcher first and the job took the collector with it before =WM_QUERYENDSESSION= reached its window (issue #10). So on Windows a bare =python -m timeexisting collect= checks its own job before it imports anything else (=collector/respawn.py=, =collector/respawn_win32.py=): inside a kill-on-close job that allows breakaway, with no console attached and no =TIMEEXISTING_RESPAWNED= in its environment, it starts =sys._base_executable -m timeexisting collect= with =__PYVENV_LAUNCHER__= set to its own =sys.executable=, so the child reports the venv exactly as it did, closes its log and exits 0. The launcher returns, its job closes with nobody left in it, and the child, outside any job, takes the lock. The viewer's spawn and the Startup shortcut both go through this hop; a console run, a job without breakaway, a missing base interpreter or an unreadable probe stays where it is and logs why, and the respawned collector's own probe line records where it ended up. The lock is taken before the backfill of the gap since the previous run, so the viewer does not resolve the day's start until the checkpoint written after the first event log read, the first of the run that holds the read cursors, is on disk for the spawned pid; on 28 October 2026 the viewer read the ledger 30 ms after the lock, before the morning's unlock was backfilled, and prompted. On the timeout the viewer carries on and reads the ledger as it stands. A collector found running is attached at once; when the ledger then holds no start for the day, the viewer waits for that collector's next reconciled checkpoint (bounded by one tick plus the pending window of section 8) and resolves once more before it prompts, since a launch within a tick of a wake reads a ledger without the wake's unlock. A first resolution that succeeds waits for nothing.
-- =q= quits the viewer and leaves the collector. =Q= stops both. The viewer reads keys by polling the terminal once per render tick (section 12), never on a thread.
+- =q= quits the viewer and leaves the collector. =Q=, quitting both, is not built; it arrives with the key help in phase 8, and until then the viewer drops it. The viewer reads keys by polling the terminal once per render tick (section 12), never on a thread.
 - A Startup shortcut created by =scripts/install-startup.ps1= runs =te collect= on every interactive logon.
 - The hidden window. On Windows the collector creates one hidden top-level window on a daemon thread: a registered window class, no parent, no =WS_VISIBLE=, never shown, =WS_EX_TOOLWINDOW= so it has no taskbar entry. Not a message-only window (=HWND_MESSAGE= parent): those cannot be enumerated and do not receive broadcast messages, and the session-end and power broadcasts go to the session's top-level windows, so a message-only window never hears them; the first live restart confirmed it. This one window is the receiver for every Windows notification the collector uses, and no second window is created:
   - Session end: =WM_QUERYENDSESSION= and =WM_ENDSESSION=.
@@ -88,7 +85,7 @@ The dashboard is not open all day. The collector must survive the terminal closi
   - Power: =WM_POWERBROADCAST=; =PBT_APMSUSPEND= becomes =suspend= and the resume messages become =resume=, source =power=, with the message name in =detail=.
   - Every message is logged at INFO with =wParam= and =lParam= on arrival, so a live test shows whether delivery happened even when a write fails.
 - Single writer. The window thread never appends to the ledger. It puts each session or power transition, stamped at receipt, on a queue that the collector's tick loop drains, so ledger order is append order and the tick loop's append-and-fsync is the only write path. The one exception is session end: there is no later tick, so the window thread runs the shutdown itself, serialised against the tick loop by the shutdown mutex.
-- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. The hidden window answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, deletes the checkpoint, then releases the lock, before the process dies. A restart on 5 October 2026 wrote no =session_end= and was recovered as =unclean=; this is an open phase 2 defect recorded in =logs.org=, outside phase 3.
+- Session end on Windows. The detached collector runs under =pythonw.exe= with no console, so =SetConsoleCtrlHandler= never fires there. The hidden window answers =WM_QUERYENDSESSION= with =True= and, on =WM_ENDSESSION= with =wParam= true, writes =collector_stop= with reason =session_end= and an fsync, deletes the checkpoint, then releases the lock, before the process dies. Restarts on 5 and 27 October 2026 wrote no =session_end= and were recovered as =unclean= (issue #10): the launcher's kill-on-close job took the collector before the message reached its window. Fixed by the respawn described under viewer start above (PR #30, v0.3.3) and verified on the Windows Update restart of 5 November 2026, when =WM_QUERYENDSESSION= arrived 0.6 s after the restart request (System event 1074), =WM_ENDSESSION= 57 ms later and the =session_end= stop 46 ms after that.
 - When =te collect= runs in a terminal, a console control handler (=SetConsoleCtrlHandler=) is registered as well, for =CTRL_CLOSE_EVENT=, =CTRL_LOGOFF_EVENT= and =CTRL_SHUTDOWN_EVENT=. Both paths call one idempotent shutdown function, since logoff can deliver both.
 - The collector runs across midnight without restarting. Day state is derived per tick from the current date, never captured at startup.
 
@@ -382,12 +379,12 @@ Gaps and how they arise:
 |---|---|---|---|
 | Clock jump while running | More than twice the tick since the previous tick | Previous tick to now | Pending gap, resolved by the System log read (below) |
 | =resume= notification while running | =WM_POWERBROADCAST= | none of its own | Write the =power= =resume= at receipt. The System log read every tick writes the =eventlog= pair; no pending gap is opened for it |
-| Leftover checkpoint at start | The checkpoint exists | Checkpoint timestamp to this start | Write =collector_stop= at the checkpoint, =inferred=, reason =unclean= (unchanged from phase 2); carry on from the cursors and pending gaps it holds; backfill |
+| Leftover checkpoint at start | The checkpoint exists | Checkpoint timestamp to this start | Write =collector_stop= at the checkpoint, =inferred=, reason =unclean=, unless the host's last ledger event is already a =collector_stop= at or after it (section 3); carry on from the cursors and pending gaps it holds; backfill |
 | Last stop =session_end= | The shard's last =collector_stop= | That stop to this start | Backfill and reconstruct |
 | Last stop deliberate: =stop_file=, =signal=, =console_close=, =max_ticks= | The shard's last =collector_stop= | That stop to this start | No backfill, no reconstruction; presence stays closed until the next =collector_start= |
 | No events on this host | Empty shard | none | Normal start resolution (section 4) |
 
-Deliberate stops, from the code: =stop_file= is written only by =te collect stop=. =signal= (SIGINT or SIGBREAK, SIGTERM off Windows) and =console_close= can only reach a collector running in a terminal, since the background collector runs under =pythonw.exe=, detached, with no console and every stream on =DEVNULL=; a Task Manager kill writes no stop at all and is recovered as =unclean=. =max_ticks= is test-only and treated the same. When the Fedora backend arrives, =signal= is revisited: systemd sends SIGTERM at shutdown, which is not intent.
+Deliberate stops, from the code: =stop_file= is written only by =te collect stop=. On Windows, =signal= (SIGINT or SIGBREAK) and =console_close= can only reach a collector running in a terminal, since the background collector runs under =pythonw.exe=, detached, with no console and every stream on =DEVNULL=; a Task Manager kill writes no stop at all and is recovered as =unclean=. =max_ticks= is test-only and treated the same. On POSIX this does not hold: a detached collector receives systemd's SIGTERM at shutdown and records it as a deliberate =signal= stop, though shutdown is not intent. That is issue #28, open, deferred to a Linux session (section 18).
 
 The System log every tick. On the work laptop no =WM_POWERBROADCAST= arrives under Modern Standby (step 5), and the collector keeps ticking through the screen-off phase (step 0: 26875 seconds inside 506 to 507 windows), so a sleep can begin before the last tick and some sleeps never cause a clock jump at all. The System log is therefore the primary source of sleep boundaries and is read on every tick, behind a cursor in the checkpoint; the clock jump only decides when to fall back to the clock. The query filters on provider and event ID in its XPath, as does the Winlogon/Operational one, never in code after a broad read. The reader's caller contract:
 
@@ -515,16 +512,18 @@ Tables: =[holidays.add]=, =[holidays.remove]=, =[ferie]=, =[sygdom]=, =[afspadse
 
 The render loop polls the terminal once per tick, after the sleep and before the next repaint, and drains every key that arrived: =msvcrt.kbhit= and =getwch= on Windows (a =\x00= or =\xe0= prefix is a special key, consumed with its second half and dropped); on POSIX the terminal is put in cbreak for the viewer's lifetime, =ISIG= left on so Ctrl+C stays a signal, =select= with a zero timeout and a one-byte =os.read=, the saved attributes restored on every exit. When stdin is not a terminal nothing is polled. No reader thread and no =readchar=: a thread blocked in a read cannot be stopped, holds the terminal mode at exit, and is one more place a Ctrl+C can land, and a key answered within one tick is as prompt as the display. Anything needing the full terminal calls =live.stop()= first.
 
-| Key | Action |
-|---|---|
-| =c= | Classify queued absences |
-| =f= | Set a day flag |
-| =s= | Stats for the current week |
-| =n= | Note at the current timestamp |
-| =z= | Sleep now, recording the shortfall |
-| =r= | Reload config and calendar |
-| =q= / =Q= | Quit viewer / quit viewer and collector |
-| =?= | Key help. The postpone key is deliberately absent from it. |
+Only =q= is built at v0.3.3; the render loop drains every other key and drops it. The column gives the phase each key arrives in.
+
+| Key | Action | Status |
+|---|---|---|
+| =c= | Classify queued absences | Phase 4 |
+| =f= | Set a day flag | Phase 4, with leave and the calendar (=-f= on the command line since phase 1) |
+| =s= | Stats for the current week | Phase 6 |
+| =n= | Note at the current timestamp | Phase 7, with the editor |
+| =z= | Sleep now, recording the shortfall | Phase 5 |
+| =r= | Reload config and calendar | Phase 4, with the calendar |
+| =q= / =Q= | Quit viewer / quit viewer and collector | =q= built (issue #3); =Q= phase 8, with the key help |
+| =?= | Key help. The postpone key is deliberately absent from it. | Phase 8 |
 
 ** Notifications
 
@@ -680,9 +679,14 @@ Corrections are appended, never rewritten in place. A correction is a =void= or 
 |---|---|
 | Hostnames and profiles for the gaming rig and the Fedora box | Self-answerable, fill =[profiles.hosts]= |
 | Old GitHub repository holding the 600-line version | Archive it |
-| Fedora D-Bus backend (=org.gnome.ScreenSaver.ActiveChanged=, =org.freedesktop.login1.PrepareForSleep=) | Deferred: cannot be live-checked on the work laptop. The backend registry leaves room for it. Revisit =signal= as a deliberate stop when it arrives (section 8) |
+| Fedora D-Bus backend (=org.gnome.ScreenSaver.ActiveChanged=, =org.freedesktop.login1.PrepareForSleep=) | Deferred: cannot be live-checked on the work laptop. The backend registry leaves room for it. Issue #28 (systemd's SIGTERM at shutdown recorded as a deliberate =signal= stop, section 8) is resolved in the same Linux session |
 | Holiday exclusion in ={remaining_week}= | Waiting for phase 4 (calendar) |
 | Ledger backup | Undecided: destination and mechanism |
+| Restart strictness: after a clean stop or a crash, presence stays =inferred= until the next event log lock or unlock (seen daily as an =(inferred)= window start; 53 minutes after the 27 October 2026 restart) | Safe under the governing rule of section 8. Revisit in phase 4, where inferred time starts to cost credit |
+| A short logon before the commute is taken as the day's start by rule 2 (07:01, 42 s, 28 October 2026) | Revisit with phase 4's classification rules |
+| No warning when the window's end passes =credit.latest=; an evening shift needs =credit.latest= and the night window moved | Phase 5 |
+| The viewer is silent while it waits for a spawned collector's backfill (up to 10 s) or a running collector's next tick (about 30 s) | A pack line in phase 8 |
+| The placeholder packs (grimdark/da, hygge/en, tau/en) lack the key skeleton of section 14 and a key-parity test | Phase 9 |
 | Teams presence | Decided in design, built in phase 5; rules below |
 
 ** Teams presence
